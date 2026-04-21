@@ -1,5 +1,4 @@
 const { SerialPort } = require("serialport");
-const { ReadlineParser } = require("@serialport/parser-readline");
 const WebSocket = require("ws");
 
 const wss = new WebSocket.Server({ port: 8080 });
@@ -23,7 +22,16 @@ const send = (payload) => {
 
 const attachScanner = (device, portPath) => {
   const port = new SerialPort({ path: portPath, baudRate: 9600 });
-  const parser = port.pipe(new ReadlineParser({ delimiter: "\r\n" }));
+  let buffer = "";
+  let flushTimer = null;
+
+  const emitScan = (value) => {
+    const scannedValue = String(value).trim();
+    if (!scannedValue) return;
+
+    console.log(`${device}:`, scannedValue);
+    send({ device, value: scannedValue, ts: Date.now() });
+  };
 
   port.on("open", () => {
     console.log(`Scanner ${device} connected on ${portPath}`);
@@ -33,12 +41,19 @@ const attachScanner = (device, portPath) => {
     console.error(`Scanner ${device} serial error (${portPath}):`, err.message);
   });
 
-  parser.on("data", (value) => {
-    const scannedValue = String(value).trim();
-    if (!scannedValue) return;
+  // Support scanners that terminate with CRLF, CR, LF, or no suffix.
+  port.on("data", (chunk) => {
+    buffer += chunk.toString("utf8");
+    const parts = buffer.split(/\r\n|\r|\n/);
+    buffer = parts.pop() || "";
 
-    console.log(`${device}:`, scannedValue);
-    send({ device, value: scannedValue, ts: Date.now() });
+    parts.forEach(emitScan);
+
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+      if (buffer.trim()) emitScan(buffer);
+      buffer = "";
+    }, 60);
   });
 };
 
