@@ -43,6 +43,10 @@ const attachScanner = (device, portPath) => {
 
   // Support scanners that terminate with CRLF, CR, LF, or no suffix.
   port.on("data", (chunk) => {
+    const chunkText = chunk.toString("utf8");
+    const chunkHex = Buffer.from(chunk).toString("hex");
+    console.log(`[${device}] raw chunk text="${chunkText}" hex=${chunkHex}`);
+
     buffer += chunk.toString("utf8");
     const parts = buffer.split(/\r\n|\r|\n/);
     buffer = parts.pop() || "";
@@ -60,6 +64,9 @@ const attachScanner = (device, portPath) => {
 attachScanner("A", scannerPorts.A);
 attachScanner("B", scannerPorts.B);
 
-wss.on("connection", () => {
+wss.on("connection", (ws) => {
   console.log("Client connected to WebSocket");
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "ws_connected", ts: Date.now() }));
+  }
 });

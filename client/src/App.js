@@ -13,11 +13,34 @@ function App() {
   const [aData, setAData] = useState([]);
   const [bData, setBData] = useState([]);
 
-  useEffect(() => {
+useEffect(() => {
     const ws = new WebSocket("ws://localhost:8080");
+console.log("Connecting to WebSocket at ws://localhost:8080");
 
+    ws.onopen = () => {
+      console.log("WebSocket connection established.");
+    };
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+    ws.onclose = (event) => {
+      console.warn("WebSocket closed:", event.code, event.reason || "no reason");
+    };
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      console.log("Raw message event:", event.data);
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (err) {
+        console.error("Invalid JSON packet:", event.data, err);
+        return;
+      }
+      console.log("Received data:", data);
+
+      if (data.type === "ws_connected") {
+        console.log("Server hello received at", new Date(data.ts).toLocaleTimeString());
+        return;
+      }
 
       if (data.device === "A") {
         setAData((prev) => [...prev, data.value]);
