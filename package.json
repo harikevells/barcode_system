@@ -1,0 +1,19 @@
+{
+  "name": "barcode-system",
+  "version": "1.0.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "concurrently \"npm run server\" \"npm run client\" \"npm run electron\"",
+    "server": "node server/serialServer.js",
+    "client": "cd client && npm start",
+    "electron": "cd electron && electron ."
+  },
+  "dependencies": {
+    "@serialport/parser-readline": "^12.0.0",
+    "concurrently": "^8.0.0",
+    "electron": "^31.0.0",
+    "serialport": "^12.0.0",
+    "ws": "^8.0.0"
+  }
+}
