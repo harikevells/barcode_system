@@ -19,6 +19,26 @@ function App() {
       const code = scannedValue.trim();
       if (!code) return;
 
+      // --- STRICT VALIDATION ---
+      // 1. Length check (Normal barcodes are ~13 chars, 16 is a safe ceiling)
+      if (code.length > 16) {
+        console.warn(`Blocked long scan (${code.length} chars): ${code}`);
+        setLastInputSource(`⚠️ Blocked: Scan too long (${source})`);
+        return;
+      }
+
+      // 2. Pattern check: Should only have ONE prefix character (A or B) at the very start
+      const upperCode = code.toUpperCase();
+      const hasA = upperCode.includes("A");
+      const hasB = upperCode.includes("B");
+      
+      // If it contains both prefixes, or if the prefix isn't at index 0, it's a concatenation/error
+      if ((hasA && hasB) || (upperCode.indexOf("A") > 0) || (upperCode.indexOf("B") > 0)) {
+        console.warn(`Blocked invalid/concatenated scan: ${code}`);
+        setLastInputSource(`⚠️ Blocked: Invalid format (${source})`);
+        return;
+      }
+
       // De-duplication: Ignore if exactly the same code was scanned in the last 300ms
       const nowTs = Date.now();
       if (lastProcessedCode.current.code === code && nowTs - lastProcessedCode.current.ts < 300) {
@@ -30,11 +50,11 @@ function App() {
       const timeStr = new Date().toLocaleTimeString();
 
       // Route by prefix: A%% → Column A, B%% → Column B
-      if (code.toUpperCase().startsWith("A")) {
+      if (upperCode.startsWith("A")) {
         setAData((prev) => [...prev, { value: code, ts: nowTs }]);
         setLastInputSource(`Scanner A → Column A (${source} @ ${timeStr})`);
         setScannerAStatus("Active");
-      } else if (code.toUpperCase().startsWith("B")) {
+      } else if (upperCode.startsWith("B")) {
         setBData((prev) => [...prev, { value: code, ts: nowTs }]);
         setLastInputSource(`Scanner B → Column B (${source} @ ${timeStr})`);
         setScannerBStatus("Active");
@@ -79,14 +99,13 @@ function App() {
 
     const handleKeydownDetection = (e) => {
       // Most HID scanners send "Enter" at the end of a scan. 
-      // Processing immediately on Enter prevents concatenations completely!
       if (e.key === "Enter" && hidBuffer.current.length > 3) {
         if (hidTimer.current) clearTimeout(hidTimer.current);
         const code = hidBuffer.current;
-        hidBuffer.current = "";
+        hidBuffer.current = ""; // Clear buffer immediately
         
-        // If it's still somehow concatenated, block it and alert.
-        if (code.length > 20) {
+        // Catch obvious concatenations early
+        if (code.length > 16 || (code.toUpperCase().includes("A") && code.toUpperCase().includes("B"))) {
           alert("Overlapping/Concatenated scans detected! Please scan again.");
           return;
         }
@@ -101,14 +120,15 @@ function App() {
           if (hidBuffer.current.length > 3) {
             const code = hidBuffer.current;
             hidBuffer.current = "";
-            if (code.length > 20) {
+            
+            if (code.length > 16 || (code.toUpperCase().includes("A") && code.toUpperCase().includes("B"))) {
                alert("Overlapping/Concatenated scans detected! Please scan again.");
             } else {
                processScan(code, "Keyboard/HID");
             }
           }
           hidBuffer.current = "";
-        }, 50); // Reduced to 50ms to prevent consecutive scans from blending
+        }, 50); 
       }
     };
 
