@@ -1,72 +1,112 @@
 const { SerialPort } = require("serialport");
-const WebSocket = require("ws");
+const { ReadlineParser } = require("@serialport/parser-readline");
+const { WebSocketServer } = require("ws");
 
-const wss = new WebSocket.Server({ port: 8080 });
+const WSS_PORT = 8080;
+const wss = new WebSocketServer({ port: WSS_PORT });
 
-console.log("WebSocket running on ws://localhost:8080");
+console.log(`🚀 Serial WebSocket Server running on ws://localhost:${WSS_PORT}`);
 
-// Change scanner COM ports here (e.g., COM3/COM4 on Windows or /dev/tty.* on macOS).
-const scannerPorts = {
-  A: "COM3",
-  B: "COM4",
-};
+const clients = new Set();
 
-const send = (payload) => {
-  const packet = JSON.stringify(payload);
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(packet);
+wss.on("connection", (ws) => {
+  console.log("🔌 Client connected");
+  clients.add(ws);
+  ws.on("close", () => {
+    console.log("❌ Client disconnected");
+    clients.delete(ws);
+  });
+});
+
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(message);
     }
   });
-};
+}
 
-const attachScanner = (device, portPath) => {
-  const port = new SerialPort({ path: portPath, baudRate: 9600 });
-  let buffer = "";
-  let flushTimer = null;
+// Function to initialize serial ports
+async function initSerialPorts() {
+  try {
+    const ports = await SerialPort.list();
+    console.log("🔍 Available ports:", ports.map(p => p.path).join(", ") || "None found");
 
-  const emitScan = (value) => {
-    const scannedValue = String(value).trim();
-    if (!scannedValue) return;
+    ports.forEach((portInfo) => {
+      // Skip internal/unlikely ports if necessary, but here we'll try to open everything that looks like a USB serial device
+      if (portInfo.vendorId || portInfo.productId) {
+        openPort(portInfo.path);
+      }
+    });
+  } catch (err) {
+    console.error("❌ Error listing ports:", err);
+  }
+}
 
-    console.log(`${device}:`, scannedValue);
-    send({ device, value: scannedValue, ts: Date.now() });
-  };
+function openPort(path) {
+  const port = new SerialPort({
+    path: path,
+    baudRate: 9600, // Standard for most scanners
+    autoOpen: false,
+  });
+
+  // Handle both \r\n and \r or \n as delimiters
+  const parser = port.pipe(new ReadlineParser({ delimiter: /\r?\n|\r/ }));
 
   port.on("open", () => {
-    console.log(`Scanner ${device} connected on ${portPath}`);
+    console.log(`✅ Port Opened: ${path}`);
   });
 
   port.on("error", (err) => {
-    console.error(`Scanner ${device} serial error (${portPath}):`, err.message);
+    console.error(`❌ Port Error (${path}):`, err.message);
+    // Retry logic
+    setTimeout(() => {
+      if (!port.isOpen) {
+        console.log(`🔄 Retrying port ${path}...`);
+        port.open((err) => { if (err) console.error(err.message); });
+      }
+    }, 5000);
   });
 
-  // Support scanners that terminate with CRLF, CR, LF, or no suffix.
-  port.on("data", (chunk) => {
-    const chunkText = chunk.toString("utf8");
-    const chunkHex = Buffer.from(chunk).toString("hex");
-    console.log(`[${device}] raw chunk text="${chunkText}" hex=${chunkHex}`);
-
-    buffer += chunk.toString("utf8");
-    const parts = buffer.split(/\r\n|\r|\n/);
-    buffer = parts.pop() || "";
-
-    parts.forEach(emitScan);
-
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = setTimeout(() => {
-      if (buffer.trim()) emitScan(buffer);
-      buffer = "";
-    }, 60);
+  parser.on("data", (data) => {
+    const cleanData = data.toString().trim();
+    if (cleanData) {
+      console.log(`📡 [${path}] Scanned: ${cleanData}`);
+      broadcast({
+        source: "serial",
+        port: path,
+        value: cleanData,
+        timestamp: Date.now()
+      });
+    }
   });
-};
 
-attachScanner("A", scannerPorts.A);
-attachScanner("B", scannerPorts.B);
+  // Explicitly log raw data for debugging
+  port.on("data", (data) => {
+    console.log(`📦 RAW [${path}]: ${data.toString()}`);
+  });
 
-wss.on("connection", (ws) => {
-  console.log("Client connected to WebSocket");
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "ws_connected", ts: Date.now() }));
-  }
-});
+  port.on("close", () => {
+    console.log(`⚠️ Port Closed: ${path}`);
+    setTimeout(() => {
+      console.log(`🔄 Re-opening port ${path}...`);
+      port.open((err) => { if (err) console.error(err.message); });
+    }, 2000);
+  });
+
+  port.open((err) => {
+    if (err) {
+      console.error(`❌ Initial open failed (${path}):`, err.message);
+    }
+  });
+}
+
+initSerialPorts();
+
+// Periodically check for new ports
+setInterval(async () => {
+  const ports = await SerialPort.list();
+  // Only try to open ports that aren't already managed could be added here
+  // For simplicity, we just list them or let the initial setup handle it
+}, 10000);
