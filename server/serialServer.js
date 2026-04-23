@@ -34,10 +34,9 @@ async function initSerialPorts() {
     console.log("🔍 Available ports:", ports.map(p => p.path).join(", ") || "None found");
 
     ports.forEach((portInfo) => {
-      // Skip internal/unlikely ports if necessary, but here we'll try to open everything that looks like a USB serial device
-      if (portInfo.vendorId || portInfo.productId) {
-        openPort(portInfo.path);
-      }
+      // Opening all ports since some scanners (especially virtual COM ports) might missing vendorId/productId
+      console.log(`🔌 Attempting to open port: ${portInfo.path}`);
+      openPort(portInfo.path);
     });
   } catch (err) {
     console.error("❌ Error listing ports:", err);
@@ -51,8 +50,9 @@ function openPort(path) {
     autoOpen: false,
   });
 
-  // Handle both \r\n and \r or \n as delimiters
-  const parser = port.pipe(new ReadlineParser({ delimiter: /\r?\n|\r/ }));
+  // Scanners usually send \r or \r\n at the end of a scan. 
+  // ReadlineParser requires a string or Buffer, not a Regex.
+  const parser = port.pipe(new ReadlineParser({ delimiter: '\r' }));
 
   port.on("open", () => {
     console.log(`✅ Port Opened: ${path}`);

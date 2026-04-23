@@ -46,7 +46,7 @@ function App() {
     const connectWS = () => {
       const ws = new WebSocket("ws://127.0.0.1:8080");
       wsRef.current = ws;
-
+      console.log("ws", ws);
       ws.onopen = () => {
         console.log("Connected to Serial Server");
         setWsStatus("Connected");
@@ -55,8 +55,11 @@ function App() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          // Log the incoming Websocket (serial) data to the browser console
+          console.log("📥 Serial Data Received:", data);
+
           if (data.source === "serial") {
-            processScan(data.value, `Serial:${data.port.split('\\').pop()}`);
+            processScan(data.value, `Serial:${data.port.split('\\\\').pop()}`);
           }
         } catch (e) {
           console.error("WS Parse Error", e);
@@ -75,15 +78,37 @@ function App() {
     };
 
     const handleKeydownDetection = (e) => {
+      // Most HID scanners send "Enter" at the end of a scan. 
+      // Processing immediately on Enter prevents concatenations completely!
+      if (e.key === "Enter" && hidBuffer.current.length > 3) {
+        if (hidTimer.current) clearTimeout(hidTimer.current);
+        const code = hidBuffer.current;
+        hidBuffer.current = "";
+        
+        // If it's still somehow concatenated, block it and alert.
+        if (code.length > 20) {
+          alert("Overlapping/Concatenated scans detected! Please scan again.");
+          return;
+        }
+        processScan(code, "Keyboard/HID");
+        return;
+      }
+
       if (e.key.length === 1) {
         hidBuffer.current += e.key;
         if (hidTimer.current) clearTimeout(hidTimer.current);
         hidTimer.current = setTimeout(() => {
           if (hidBuffer.current.length > 3) {
-            setHidDetection(`Detected HID scan: ${hidBuffer.current} (Ignored)`);
+            const code = hidBuffer.current;
+            hidBuffer.current = "";
+            if (code.length > 20) {
+               alert("Overlapping/Concatenated scans detected! Please scan again.");
+            } else {
+               processScan(code, "Keyboard/HID");
+            }
           }
           hidBuffer.current = "";
-        }, 100);
+        }, 50); // Reduced to 50ms to prevent consecutive scans from blending
       }
     };
 
@@ -155,18 +180,18 @@ function App() {
           flexWrap: "wrap",
         }}
       >
-          <span
-            style={{
-              background: wsStatus === "Connected" ? "#e8f5e9" : "#ffebee",
-              color: wsStatus === "Connected" ? "#2e7d32" : "#c62828",
-              borderRadius: 5,
-              padding: "2px 10px",
-              fontSize: 13,
-              fontWeight: 600,
-            }}
-          >
-            Serial Server: {wsStatus}
-          </span>
+        <span
+          style={{
+            background: wsStatus === "Connected" ? "#e8f5e9" : "#ffebee",
+            color: wsStatus === "Connected" ? "#2e7d32" : "#c62828",
+            borderRadius: 5,
+            padding: "2px 10px",
+            fontSize: 13,
+            fontWeight: 600,
+          }}
+        >
+          Serial Server: {wsStatus}
+        </span>
         <div style={{ color: "#ccc" }}>|</div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <StatusDot status={scannerAStatus} />
@@ -231,11 +256,11 @@ function App() {
         style={{
           marginBottom: 20,
           padding: "10px 18px",
-          background: "#fffde7",
-          border: "1px solid #fff59d",
+          background: "#e8f5e9",
+          border: "1px solid #c8e6c9",
           borderRadius: 10,
           fontSize: 13,
-          color: "#f57f17",
+          color: "#2e7d32",
           fontWeight: 500,
           display: "flex",
           justifyContent: "space-between",
@@ -243,13 +268,8 @@ function App() {
         }}
       >
         <span>
-          🔒 <strong>Serial Mode Only:</strong> Keyboard/HID input is disabled. Ensure your scanner is in COM/Serial mode.
+          ✅ <strong>Dual Mode Enabled:</strong> Dashboard is now accepting BOTH Serial Port / COM scans AND direct Keyboard / HID scans!
         </span>
-        {hidDetection && (
-          <span style={{ color: "#d32f2f", background: "#ffebee", padding: "2px 8px", borderRadius: 4, animation: "pulse 1s infinite" }}>
-            ⚠️ {hidDetection}
-          </span>
-        )}
       </div>
 
       {/* Scan Columns */}
