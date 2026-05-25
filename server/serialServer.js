@@ -1,10 +1,142 @@
 const { SerialPort } = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
 const { WebSocketServer } = require("ws");
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
 
 const WSS_PORT = 8080;
-const wss = new WebSocketServer({ port: WSS_PORT });
+const API_PORT = 5000;
 
+// --- MongoDB Setup ---
+mongoose.connect("mongodb://127.0.0.1:27017/barcodeDB")
+  .then(() => console.log("📦 Connected to MongoDB"))
+  .catch(err => console.error("❌ MongoDB connection error:", err));
+
+const shelfSchema = new mongoose.Schema({
+  shelfCode: String,
+  createdAt: { type: Date, default: Date.now },
+  products: [
+    {
+      barcode: String,
+      type: { type: String, enum: ["scan", "manual"] },
+      timestamp: { type: Date, default: Date.now }
+    }
+  ]
+});
+
+const Shelf = mongoose.model("Shelf", shelfSchema);
+
+// --- Express Setup ---
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+let activeShelfData = null;
+
+// Start new shelf
+app.post("/api/shelf/start", async (req, res) => {
+  const { shelfCode } = req.body;
+  activeShelfData = { shelfCode, products: [] };
+  console.log(`🆕 Started Shelf: ${shelfCode}`);
+  res.json({ message: "Shelf started", shelfCode });
+});
+
+// Resume existing shelf
+app.post("/api/shelf/resume", async (req, res) => {
+  const { shelfCode } = req.body;
+  try {
+    const existing = await Shelf.findOne({ shelfCode }).sort({ createdAt: -1 });
+    if (!existing) return res.status(404).json({ error: "Shelf not found" });
+    
+    activeShelfData = { 
+      shelfCode: existing.shelfCode, 
+      products: existing.products 
+    };
+    console.log(`🔄 Resumed Shelf: ${shelfCode}`);
+    res.json(existing);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add scanned product
+app.post("/api/scan", async (req, res) => {
+  const { barcode } = req.body;
+  if (!activeShelfData) {
+    return res.status(400).json({ error: "No active shelf. Scan a shelf first." });
+  }
+
+  const product = { barcode, type: "scan", timestamp: new Date() };
+  activeShelfData.products.push(product);
+  
+  // Persistence: We can save to DB on every scan to ensure no data loss
+  // Or save when a new shelf starts. Requirement says "Save previous shelf data to MongoDB"
+  // but also "Ensure no data loss during continuous scanning". 
+  // I'll update the DB entry for the current shelf.
+  
+  try {
+    await Shelf.findOneAndUpdate(
+      { shelfCode: activeShelfData.shelfCode, createdAt: { $gte: new Date().setHours(0,0,0,0) } }, // Simple check for today's shelf or just the latest one
+      { $push: { products: product } },
+      { upsert: true, new: true }
+    );
+    res.json({ message: "Product added", product });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add manual product
+app.post("/api/manual", async (req, res) => {
+  const { barcode } = req.body;
+  if (!activeShelfData) {
+    return res.status(400).json({ error: "No active shelf. Scan a shelf first." });
+  }
+
+  const product = { barcode, type: "manual", timestamp: new Date() };
+  activeShelfData.products.push(product);
+
+  try {
+    await Shelf.findOneAndUpdate(
+      { shelfCode: activeShelfData.shelfCode },
+      { $push: { products: product } },
+      { upsert: true, new: true }
+    );
+    res.json({ message: "Manual product added", product });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch all data
+app.get("/api/shelves", async (req, res) => {
+  try {
+    const shelves = await Shelf.find().sort({ createdAt: -1 });
+    res.json(shelves);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear DB or Session
+app.delete("/api/clear", async (req, res) => {
+  try {
+    // Optionally clear DB or just active session
+    // activeShelfData = null;
+    await Shelf.deleteMany({});
+    res.json({ message: "Database cleared" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(API_PORT, () => {
+  console.log(`🌐 API Server running on http://localhost:${API_PORT}`);
+});
+
+// --- WebSocket Setup ---
+const wss = new WebSocketServer({ port: WSS_PORT });
 console.log(`🚀 Serial WebSocket Server running on ws://localhost:${WSS_PORT}`);
 
 const clients = new Set();
@@ -34,7 +166,6 @@ async function initSerialPorts() {
     console.log("🔍 Available ports:", ports.map(p => p.path).join(", ") || "None found");
 
     ports.forEach((portInfo) => {
-      // Opening all ports since some scanners (especially virtual COM ports) might missing vendorId/productId
       console.log(`🔌 Attempting to open port: ${portInfo.path}`);
       openPort(portInfo.path);
     });
@@ -46,12 +177,10 @@ async function initSerialPorts() {
 function openPort(path) {
   const port = new SerialPort({
     path: path,
-    baudRate: 9600, // Standard for most scanners
+    baudRate: 9600,
     autoOpen: false,
   });
 
-  // Scanners usually send \r or \r\n at the end of a scan. 
-  // ReadlineParser requires a string or Buffer, not a Regex.
   const parser = port.pipe(new ReadlineParser({ delimiter: '\r' }));
 
   port.on("open", () => {
@@ -60,7 +189,6 @@ function openPort(path) {
 
   port.on("error", (err) => {
     console.error(`❌ Port Error (${path}):`, err.message);
-    // Retry logic
     setTimeout(() => {
       if (!port.isOpen) {
         console.log(`🔄 Retrying port ${path}...`);
@@ -82,11 +210,6 @@ function openPort(path) {
     }
   });
 
-  // Explicitly log raw data for debugging
-  port.on("data", (data) => {
-    console.log(`📦 RAW [${path}]: ${data.toString()}`);
-  });
-
   port.on("close", () => {
     console.log(`⚠️ Port Closed: ${path}`);
     setTimeout(() => {
@@ -103,10 +226,3 @@ function openPort(path) {
 }
 
 initSerialPorts();
-
-// Periodically check for new ports
-setInterval(async () => {
-  const ports = await SerialPort.list();
-  // Only try to open ports that aren't already managed could be added here
-  // For simplicity, we just list them or let the initial setup handle it
-}, 10000);
