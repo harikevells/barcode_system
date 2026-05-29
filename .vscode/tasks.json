@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run app",
+			"type": "shell",
+			"command": "npm start",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run app (bypass)",
+			"type": "shell",
+			"command": "powershell.exe -ExecutionPolicy Bypass -NoProfile -Command \"Set-Location 'c:\\Users\\kevel\\OneDrive\\Documents\\GitHub\\barcode_system'; npm start\"",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

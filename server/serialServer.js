@@ -1,3 +1,5 @@
+const path = require("path");
+const sqlite3 = require("sqlite3").verbose();
 const { SerialPort } = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
 const { WebSocketServer } = require("ws");
@@ -26,6 +28,17 @@ const shelfSchema = new mongoose.Schema({
 });
 
 const Shelf = mongoose.model("Shelf", shelfSchema);
+
+const bcScanSchema = new mongoose.Schema({
+  rowId: { type: Number, unique: true, index: true },
+  scannerId: Number,
+  barcode: String,
+  timestamp: Date,
+  syncedAt: { type: Date, default: Date.now },
+  source: { type: String, default: "BC" }
+}, { timestamps: true });
+
+const BCScan = mongoose.model("BCScan", bcScanSchema);
 
 // --- Express Setup ---
 const app = express();
@@ -104,6 +117,62 @@ app.post("/api/manual", async (req, res) => {
       { upsert: true, new: true }
     );
     res.json({ message: "Manual product added", product });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function readBCScans() {
+  const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
+
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => {
+      if (err) return reject(err);
+    });
+
+    db.all("SELECT id, scanner_id, barcode, timestamp FROM scans ORDER BY id ASC", (err, rows) => {
+      db.close((closeErr) => {
+        if (err) return reject(err);
+        if (closeErr) return reject(closeErr);
+        resolve(rows || []);
+      });
+    });
+  });
+}
+
+app.post("/api/sync-bc-db", async (req, res) => {
+  try {
+    const rows = await readBCScans();
+
+    let synced = 0;
+    for (const row of rows) {
+      await BCScan.updateOne(
+        { rowId: row.id },
+        {
+          $set: {
+            scannerId: row.scanner_id,
+            barcode: row.barcode,
+            timestamp: row.timestamp ? new Date(row.timestamp) : new Date(),
+            syncedAt: new Date(),
+            source: "BC"
+          }
+        },
+        { upsert: true }
+      );
+      synced += 1;
+    }
+
+    res.json({ message: "BC database synced to MongoDB", count: synced });
+  } catch (err) {
+    console.error("❌ BC sync failed:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const history = await BCScan.find().sort({ timestamp: -1, createdAt: -1 });
+    res.json(history);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

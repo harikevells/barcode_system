@@ -340,22 +340,47 @@ function Dashboard() {
 function RackHistory() {
   const navigate = useNavigate();
   const [shelves, setShelves] = useState([]);
+  const [historyData, setHistoryData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+
+  const fetchHistory = async () => {
+    try {
+      const [shelvesResponse, historyResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/shelves`),
+        fetch(`${API_BASE_URL}/history`)
+      ]);
+
+      const shelvesData = await shelvesResponse.json();
+      const historyJson = await historyResponse.json();
+
+      setShelves(shelvesData);
+      setHistoryData(historyJson);
+      setLoading(false);
+    } catch (err) {
+      console.error("Error fetching history data:", err);
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchShelves = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/shelves`);
-        const data = await response.json();
-        setShelves(data);
-        setLoading(false);
-      } catch (err) {
-        console.error("Error fetching shelves:", err);
-        setLoading(false);
-      }
-    };
-    fetchShelves();
+    fetchHistory();
   }, []);
+
+  const handleSyncBC = async () => {
+    setSyncing(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/sync-bc-db`, { method: "POST" });
+      const result = await response.json();
+      alert(result.message || "Sync complete");
+      await fetchHistory();
+    } catch (err) {
+      console.error("Error syncing BC DB:", err);
+      alert("Failed to sync BC DB to MongoDB.");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleResume = (shelf) => {
     navigate("/", { state: { resumeRack: shelf } });
@@ -368,7 +393,46 @@ function RackHistory() {
         <Link to="/" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ Back to Dashboard</Link>
       </div>
 
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <div>
+          <h2 style={{ margin: "0 0 4px", color: "#1a1a2e", fontSize: 18 }}>Sync & View</h2>
+          <p style={{ margin: 0, color: "#666", fontSize: 13 }}>Sync the BC SQLite scans into MongoDB and review the latest data list.</p>
+        </div>
+        <button
+          onClick={handleSyncBC}
+          disabled={syncing}
+          style={{ background: syncing ? "#90caf9" : "#1565c0", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, cursor: syncing ? "not-allowed" : "pointer", fontWeight: 700 }}
+        >
+          {syncing ? "Syncing..." : "Sync BC DB → MongoDB"}
+        </button>
+      </div>
+
+      <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 18 }}>
+        <h2 style={{ margin: "0 0 10px", color: "#1565c0", fontSize: 18 }}>BC Scan History (MongoDB)</h2>
+        {loading ? <p>Loading history...</p> : historyData.length === 0 ? <p>No synced BC scan data found yet.</p> : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
+                <th style={{ textAlign: "left", padding: 12 }}>Scanner</th>
+                <th style={{ textAlign: "left", padding: 12 }}>Barcode</th>
+                <th style={{ textAlign: "left", padding: 12 }}>Timestamp</th>
+              </tr>
+            </thead>
+            <tbody>
+              {historyData.map((item) => (
+                <tr key={item._id || `${item.rowId}-${item.timestamp}`} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: 12, fontWeight: 600, color: "#1565c0" }}>{item.scannerId ?? "BC"}</td>
+                  <td style={{ padding: 12, fontFamily: "monospace" }}>{item.barcode}</td>
+                  <td style={{ padding: 12 }}>{new Date(item.timestamp || item.createdAt).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
       <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+        <h2 style={{ margin: "0 0 10px", color: "#e65100", fontSize: 18 }}>Rack History</h2>
         {loading ? <p>Loading racks...</p> : shelves.length === 0 ? <p>No racks found in database.</p> : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
