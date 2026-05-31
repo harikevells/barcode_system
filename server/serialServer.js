@@ -8,7 +8,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 
 const WSS_PORT = 8080;
-const API_PORT = 5000;
+const API_PORT = 5001;
 
 // --- MongoDB Setup ---
 mongoose.connect("mongodb://127.0.0.1:27017/barcodeDB")
@@ -40,61 +40,53 @@ const bcScanSchema = new mongoose.Schema({
 
 const BCScan = mongoose.model("BCScan", bcScanSchema);
 
+// --- Product Master Schema ---
+const productSchema = new mongoose.Schema({
+  barcode: { type: String, required: true, unique: true, index: true },
+  productName: String,
+  mrp: { type: Number, default: 0 },
+  physicalQuantity: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const Product = mongoose.model("Product", productSchema);
+
+// --- Audit Session Schema ---
+const auditSessionSchema = new mongoose.Schema({
+  sessionName: String,
+  status: { type: String, enum: ["active", "completed"], default: "active" },
+  createdAt: { type: Date, default: Date.now },
+  completedAt: Date,
+  auditScans: [
+    {
+      barcode: String,
+      scanCount: Number,
+      lastScannedAt: Date
+    }
+  ]
+});
+
+const AuditSession = mongoose.model("AuditSession", auditSessionSchema);
+
 // --- Express Setup ---
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-let activeShelfData = null;
-
-// Start new shelf
-app.post("/api/shelf/start", async (req, res) => {
-  const { shelfCode } = req.body;
-  activeShelfData = { shelfCode, products: [] };
-  console.log(`🆕 Started Shelf: ${shelfCode}`);
-  res.json({ message: "Shelf started", shelfCode });
-});
-
-// Resume existing shelf
-app.post("/api/shelf/resume", async (req, res) => {
-  const { shelfCode } = req.body;
-  try {
-    const existing = await Shelf.findOne({ shelfCode }).sort({ createdAt: -1 });
-    if (!existing) return res.status(404).json({ error: "Shelf not found" });
-    
-    activeShelfData = { 
-      shelfCode: existing.shelfCode, 
-      products: existing.products 
-    };
-    console.log(`🔄 Resumed Shelf: ${shelfCode}`);
-    res.json(existing);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Add scanned product
 app.post("/api/scan", async (req, res) => {
   const { barcode } = req.body;
-  if (!activeShelfData) {
-    return res.status(400).json({ error: "No active shelf. Scan a shelf first." });
-  }
 
-  const product = { barcode, type: "scan", timestamp: new Date() };
-  activeShelfData.products.push(product);
-  
-  // Persistence: We can save to DB on every scan to ensure no data loss
-  // Or save when a new shelf starts. Requirement says "Save previous shelf data to MongoDB"
-  // but also "Ensure no data loss during continuous scanning". 
-  // I'll update the DB entry for the current shelf.
-  
   try {
-    await Shelf.findOneAndUpdate(
-      { shelfCode: activeShelfData.shelfCode, createdAt: { $gte: new Date().setHours(0,0,0,0) } }, // Simple check for today's shelf or just the latest one
-      { $push: { products: product } },
-      { upsert: true, new: true }
-    );
-    res.json({ message: "Product added", product });
+    // Store scan in BCScan collection
+    const bcScan = new BCScan({
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "web"
+    });
+    await bcScan.save();
+    res.json({ message: "Product added", product: bcScan });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -103,20 +95,16 @@ app.post("/api/scan", async (req, res) => {
 // Add manual product
 app.post("/api/manual", async (req, res) => {
   const { barcode } = req.body;
-  if (!activeShelfData) {
-    return res.status(400).json({ error: "No active shelf. Scan a shelf first." });
-  }
-
-  const product = { barcode, type: "manual", timestamp: new Date() };
-  activeShelfData.products.push(product);
 
   try {
-    await Shelf.findOneAndUpdate(
-      { shelfCode: activeShelfData.shelfCode },
-      { $push: { products: product } },
-      { upsert: true, new: true }
-    );
-    res.json({ message: "Manual product added", product });
+    // Store manual entry in BCScan collection
+    const bcScan = new BCScan({
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "manual"
+    });
+    await bcScan.save();
+    res.json({ message: "Manual product added", product: bcScan });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -126,46 +114,69 @@ function readBCScans() {
   const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
 
   return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err) => {
-      if (err) return reject(err);
-    });
+    try {
+      const db = new sqlite3.Database(dbPath, (err) => {
+        if (err) {
+          console.error("❌ SQLite connection error:", err);
+          return reject(err);
+        }
 
-    db.all("SELECT id, scanner_id, barcode, timestamp FROM scans ORDER BY id ASC", (err, rows) => {
-      db.close((closeErr) => {
-        if (err) return reject(err);
-        if (closeErr) return reject(closeErr);
-        resolve(rows || []);
+        db.serialize(() => {
+          db.all("SELECT id, scanner_id, barcode, timestamp FROM scans ORDER BY id ASC", (err, rows) => {
+            db.close((closeErr) => {
+              if (err) {
+                console.error("❌ Query error:", err);
+                return reject(err);
+              }
+              if (closeErr) {
+                console.error("❌ Close error:", closeErr);
+                return reject(closeErr);
+              }
+              console.log(`✅ Read ${rows?.length || 0} scans from BC database`);
+              resolve(rows || []);
+            });
+          });
+        });
       });
-    });
+    } catch (err) {
+      console.error("❌ Unexpected error in readBCScans:", err);
+      reject(err);
+    }
   });
 }
 
 app.post("/api/sync-bc-db", async (req, res) => {
   try {
+    console.log("📤 Starting BC database sync...");
     const rows = await readBCScans();
 
     let synced = 0;
     for (const row of rows) {
-      await BCScan.updateOne(
-        { rowId: row.id },
-        {
-          $set: {
-            scannerId: row.scanner_id,
-            barcode: row.barcode,
-            timestamp: row.timestamp ? new Date(row.timestamp) : new Date(),
-            syncedAt: new Date(),
-            source: "BC"
-          }
-        },
-        { upsert: true }
-      );
-      synced += 1;
+      try {
+        await BCScan.updateOne(
+          { rowId: row.id },
+          {
+            $set: {
+              scannerId: row.scanner_id,
+              barcode: row.barcode,
+              timestamp: row.timestamp ? new Date(row.timestamp) : new Date(),
+              syncedAt: new Date(),
+              source: "BC"
+            }
+          },
+          { upsert: true }
+        );
+        synced += 1;
+      } catch (updateErr) {
+        console.error(`❌ Failed to sync row ${row.id}:`, updateErr);
+      }
     }
 
-    res.json({ message: "BC database synced to MongoDB", count: synced });
+    console.log(`✅ Synced ${synced} records to MongoDB`);
+    res.json({ message: `BC database synced to MongoDB (${synced} records)`, count: synced });
   } catch (err) {
     console.error("❌ BC sync failed:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message || "Failed to sync BC database" });
   }
 });
 
@@ -195,6 +206,222 @@ app.delete("/api/clear", async (req, res) => {
     // activeShelfData = null;
     await Shelf.deleteMany({});
     res.json({ message: "Database cleared" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== INVENTORY RECONCILIATION ENDPOINTS ==========
+
+// Create or update a product
+app.post("/api/products", async (req, res) => {
+  try {
+    const { barcode, productName, mrp, physicalQuantity } = req.body;
+    
+    const product = await Product.findOneAndUpdate(
+      { barcode },
+      {
+        barcode,
+        productName,
+        mrp,
+        physicalQuantity,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+    
+    res.json({ message: "Product saved", product });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all products
+app.get("/api/products", async (req, res) => {
+  try {
+    const products = await Product.find().sort({ createdAt: -1 });
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single product by barcode
+app.get("/api/products/:barcode", async (req, res) => {
+  try {
+    const product = await Product.findOne({ barcode: req.params.barcode });
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Start new audit session
+app.post("/api/audit/start", async (req, res) => {
+  try {
+    const { sessionName } = req.body;
+    
+    const session = new AuditSession({
+      sessionName: sessionName || `Audit-${new Date().toLocaleString()}`,
+      status: "active",
+      auditScans: []
+    });
+    
+    await session.save();
+    res.json({ message: "Audit session started", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get active audit session
+app.get("/api/audit/session/active", async (req, res) => {
+  try {
+    const session = await AuditSession.findOne({ status: "active" }).sort({ createdAt: -1 });
+    if (!session) {
+      return res.status(404).json({ error: "No active audit session" });
+    }
+    res.json(session);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get specific audit session
+app.get("/api/audit/session/:id", async (req, res) => {
+  try {
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    res.json(session);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Record audit scan
+app.post("/api/audit/scan", async (req, res) => {
+  try {
+    const { sessionId, barcode } = req.body;
+    
+    const session = await AuditSession.findById(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    
+    // Find or create scan entry for this barcode
+    const existingIndex = session.auditScans.findIndex(s => s.barcode === barcode);
+    
+    if (existingIndex !== -1) {
+      // Increment count if barcode already scanned
+      session.auditScans[existingIndex].scanCount += 1;
+      session.auditScans[existingIndex].lastScannedAt = new Date();
+    } else {
+      // Add new scan entry
+      session.auditScans.push({
+        barcode,
+        scanCount: 1,
+        lastScannedAt: new Date()
+      });
+    }
+    
+    await session.save();
+    res.json({ message: "Scan recorded", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Complete audit session
+app.post("/api/audit/complete", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    
+    const session = await AuditSession.findByIdAndUpdate(
+      sessionId,
+      {
+        status: "completed",
+        completedAt: new Date()
+      },
+      { new: true }
+    );
+    
+    res.json({ message: "Audit session completed", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get reconciliation report
+app.get("/api/reconciliation/report/:sessionId", async (req, res) => {
+  try {
+    const session = await AuditSession.findById(req.params.sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+    
+    // Build reconciliation data
+    const reconciliationData = [];
+    let totalPhyQty = 0;
+    let totalPhyAmt = 0;
+    let totalSysQty = 0;
+    let totalSysAmt = 0;
+    let totalDiffQty = 0;
+    let totalDiffAmt = 0;
+    
+    for (const auditScan of session.auditScans) {
+      const product = await Product.findOne({ barcode: auditScan.barcode });
+      
+      if (product) {
+        const phyQty = product.physicalQuantity;
+        const sysQty = auditScan.scanCount;
+        const mrp = product.mrp;
+        
+        const phyAmt = phyQty * mrp;
+        const sysAmt = sysQty * mrp;
+        const diff = phyQty - sysQty;
+        const diffAmt = diff * mrp;
+        
+        reconciliationData.push({
+          barcode: auditScan.barcode,
+          productName: product.productName,
+          phyQty,
+          mrp,
+          phyAmt,
+          sysQty,
+          sysAmt,
+          diff,
+          diffAmt
+        });
+        
+        totalPhyQty += phyQty;
+        totalPhyAmt += phyAmt;
+        totalSysQty += sysQty;
+        totalSysAmt += sysAmt;
+        totalDiffQty += diff;
+        totalDiffAmt += diffAmt;
+      }
+    }
+    
+    res.json({
+      sessionId: session._id,
+      sessionName: session.sessionName,
+      createdAt: session.createdAt,
+      completedAt: session.completedAt,
+      data: reconciliationData,
+      summary: {
+        totalPhyQty,
+        totalPhyAmt,
+        totalSysQty,
+        totalSysAmt,
+        totalDiffQty,
+        totalDiffAmt
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
