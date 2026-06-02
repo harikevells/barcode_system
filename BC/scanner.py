@@ -1,11 +1,19 @@
-import evdev
 import threading
 import logging
 import requests
+import sys
+
+try:
+    import evdev
+    EVDEV_AVAILABLE = True
+except ImportError:
+    EVDEV_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("evdev not available (Linux-specific). Running in mock mode.")
 
 logger = logging.getLogger(__name__)
 
-WEB_API_URL = "http://127.0.0.1:8000/api/barcode"
+WEB_API_URL ="http://192.168.0.129:5001/api/barcode"
 
 
 # ---------------- SCANNER WORKER ----------------
@@ -98,6 +106,10 @@ class ScannerManager:
     # -------- AUTO DETECT SCANNERS --------
 
     def detect_scanners(self):
+        if not EVDEV_AVAILABLE:
+            logger.warning("evdev not available - no scanners will be detected")
+            return []
+        
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
         scanner_devices = []

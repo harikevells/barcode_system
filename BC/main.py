@@ -7,10 +7,12 @@ import signal
 import logging
 import time
 import os
+import threading
 
 from scanner import ScannerManager
 from database import DatabaseManager
 from config import LOG_LEVEL, SCANNERS
+from api import app as flask_app
 
 # ---------------- CREATE REQUIRED FOLDERS ----------------
 
@@ -75,6 +77,15 @@ def main():
     logger.info(f"Configured scanners: {len(SCANNERS)}")
     logger.info("====================================")
 
+    # Start Flask API in a separate thread
+    flask_thread = threading.Thread(
+        target=lambda: flask_app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False),
+        daemon=True
+    )
+    flask_thread.start()
+    logger.info("Flask API started on port 8000")
+    time.sleep(1)  # Give Flask time to start
+
     scanner_manager.start_all()
 
     try:
@@ -84,7 +95,7 @@ def main():
             total_scans = database.get_scan_count()
 
             logger.info(
-                f"Active scanners: {active_count} | Total scans: {total_scans}"
+                f"Active scanners: {active_count} | Total scans:- {total_scans}"
             )
 
             time.sleep(10)

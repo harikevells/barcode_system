@@ -14,7 +14,7 @@ function Dashboard() {
   const [manualA, setManualA] = useState("");
   const [manualB, setManualB] = useState("");
 
-  const lastProcessedCode = useRef({ code: "", ts: 0 });
+  const lastProcessedCodes = useRef({});
   const wsRef = useRef(null);
   const [wsStatus, setWsStatus] = useState("Disconnected");
   const hidBuffer = useRef("");
@@ -52,11 +52,13 @@ function Dashboard() {
         return;
       }
 
+      // De-duplication: Ignore if exactly the same code was scanned in the last 2000ms
       const nowTs = Date.now();
-      if (lastProcessedCode.current.code === code && nowTs - lastProcessedCode.current.ts < 300) {
+      if (lastProcessedCodes.current[code] && nowTs - lastProcessedCodes.current[code] < 2000) {
+        console.log(`Ignoring duplicate scan: ${code} from ${source}`);
         return;
       }
-      lastProcessedCode.current = { code, ts: nowTs };
+      lastProcessedCodes.current[code] = nowTs;
 
       try {
         await fetch(`${API_BASE_URL}/scan`, {
@@ -263,6 +265,10 @@ function RackHistory() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  const [filterScanner, setFilterScanner] = useState("All");
+  const [filterStartDate, setFilterStartDate] = useState("");
+  const [filterEndDate, setFilterEndDate] = useState("");
+
   const fetchHistory = async () => {
     try {
       const historyResponse = await fetch(`${API_BASE_URL}/history`);
@@ -277,7 +283,42 @@ function RackHistory() {
 
   useEffect(() => {
     fetchHistory();
+
+    // Connect to WebSocket for live real-time updates!
+    const ws = new WebSocket("ws://127.0.0.1:8080");
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.source === "serial") {
+          fetchHistory(); // Re-fetch the history the exact moment a scan arrives
+        }
+      } catch (e) {}
+    };
+
+    return () => ws.close();
   }, []);
+
+  const filteredData = historyData.filter((item) => {
+    // 1. Scanner Filter
+    if (filterScanner !== "All") {
+      const itemScanner = (item.scannerId ?? "BC").toString();
+      if (itemScanner !== filterScanner) return false;
+    }
+    // 2. Date Filter
+    if (filterStartDate) {
+      const itemDate = new Date(item.timestamp || item.createdAt);
+      const startDate = new Date(filterStartDate);
+      startDate.setHours(0, 0, 0, 0);
+      if (itemDate < startDate) return false;
+    }
+    if (filterEndDate) {
+      const itemDate = new Date(item.timestamp || item.createdAt);
+      const endDate = new Date(filterEndDate);
+      endDate.setHours(23, 59, 59, 999);
+      if (itemDate > endDate) return false;
+    }
+    return true;
+  });
 
   const handleSyncBC = async () => {
     setSyncing(true);
@@ -316,8 +357,38 @@ function RackHistory() {
       </div>
 
       <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 18 }}>
-        <h2 style={{ margin: "0 0 10px", color: "#1565c0", fontSize: 18 }}>BC Scan History (MongoDB)</h2>
-        {loading ? <p>Loading history...</p> : historyData.length === 0 ? <p>No synced BC scan data found yet.</p> : (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 15, flexWrap: "wrap", gap: 10 }}>
+          <h2 style={{ margin: 0, color: "#1565c0", fontSize: 18 }}>BC Scan History (MongoDB)</h2>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#2e7d32", background: "#e8f5e9", padding: "4px 12px", borderRadius: 20 }}>
+            Total Count: {filteredData.length}
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display: "flex", gap: 15, marginBottom: 20, flexWrap: "wrap", background: "#f8f9fa", padding: 15, borderRadius: 8, border: "1px solid #eee" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>Scanner ID</label>
+            <select value={filterScanner} onChange={e => setFilterScanner(e.target.value)} style={{ padding: "6px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }}>
+              <option value="All">All Scanners</option>
+              <option value="1">Scanner 1</option>
+              <option value="2">Scanner 2</option>
+              <option value="BC">BC (Legacy/Sync)</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>Start Date</label>
+            <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} style={{ padding: "5px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>End Date</label>
+            <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} style={{ padding: "5px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button onClick={() => { setFilterScanner("All"); setFilterStartDate(""); setFilterEndDate(""); }} style={{ padding: "6px 14px", borderRadius: 5, border: "1px solid #1565c0", background: "#fff", color: "#1565c0", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Reset Filters</button>
+          </div>
+        </div>
+
+        {loading ? <p>Loading history...</p> : filteredData.length === 0 ? <p>No matching scan data found.</p> : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
@@ -327,7 +398,7 @@ function RackHistory() {
               </tr>
             </thead>
             <tbody>
-              {historyData.map((item) => (
+              {filteredData.map((item) => (
                 <tr key={item._id || `${item.rowId}-${item.timestamp}`} style={{ borderBottom: "1px solid #eee" }}>
                   <td style={{ padding: 12, fontWeight: 600, color: "#1565c0" }}>{item.scannerId ?? "BC"}</td>
                   <td style={{ padding: 12, fontFamily: "monospace" }}>{item.barcode}</td>
@@ -391,7 +462,6 @@ function ProductManagement() {
       });
 
       if (response.ok) {
-        alert("Product saved successfully");
         setFormData({ barcode: "", productName: "", mrp: "", physicalQuantity: "" });
         setFormVisible(false);
         await fetchProducts();
@@ -401,6 +471,33 @@ function ProductManagement() {
     } catch (err) {
       console.error("Error saving product:", err);
       alert("Error saving product");
+    }
+  };
+
+  const handleEdit = (product) => {
+    setFormData({
+      barcode: product.barcode,
+      productName: product.productName,
+      mrp: product.mrp,
+      physicalQuantity: product.physicalQuantity
+    });
+    setFormVisible(true);
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("Are you sure you want to delete this product?")) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/products/${id}`, {
+        method: "DELETE"
+      });
+      if (response.ok) {
+        await fetchProducts();
+      } else {
+        alert("Failed to delete product");
+      }
+    } catch (err) {
+      console.error("Error deleting product:", err);
+      alert("Error deleting product");
     }
   };
 
@@ -499,6 +596,7 @@ function ProductManagement() {
                 <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Product Name</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Physical Qty</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -508,6 +606,20 @@ function ProductManagement() {
                   <td style={{ padding: 12 }}>{product.productName}</td>
                   <td style={{ textAlign: "center", padding: 12 }}>₹{product.mrp}</td>
                   <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{product.physicalQuantity}</td>
+                  <td style={{ textAlign: "center", padding: 12 }}>
+                    <button 
+                      onClick={() => handleEdit(product)}
+                      style={{ padding: "4px 8px", marginRight: 8, background: "#1565c0", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}
+                    >
+                      Edit
+                    </button>
+                    <button 
+                      onClick={() => handleDelete(product._id)}
+                      style={{ padding: "4px 8px", background: "#c62828", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -521,75 +633,88 @@ function ProductManagement() {
 // --- AUDIT SCANNING COMPONENT ---
 function AuditScanning() {
   const navigate = useNavigate();
-  const [sessionId, setSessionId] = useState(null);
-  const [sessionName, setSessionName] = useState("");
   const [scanCount, setScanCount] = useState({});
   const [totalScans, setTotalScans] = useState(0);
-  const [barcodeInput, setBarcodeInput] = useState("");
-  const [sessionActive, setSessionActive] = useState(false);
-  const inputRef = useRef(null);
+  const [products, setProducts] = useState([]);
+  const [selectedProducts, setSelectedProducts] = useState(new Set());
 
-  const startAudit = async () => {
-    if (!sessionName.trim()) {
-      alert("Please enter a session name");
-      return;
+  // Fetch all master products so we can display them during the audit
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/products`)
+      .then(res => res.json())
+      .then(data => setProducts(data))
+      .catch(err => console.error("Error fetching products:", err));
+
+    // Fetch grand totals
+    fetch(`${API_BASE_URL}/audit/totals`)
+      .then(res => res.json())
+      .then(data => {
+        setScanCount(data);
+        const total = Object.values(data).reduce((acc, val) => acc + val, 0);
+        setTotalScans(total);
+      })
+      .catch(err => console.error("Error fetching totals:", err));
+  }, []);
+
+  useEffect(() => {
+    const ws = new WebSocket("ws://127.0.0.1:8080");
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.source === "serial") {
+          handleScan(data.value, false); // Hardware scan, do NOT hit API from UI
+        }
+      } catch (e) {}
+    };
+    return () => ws.close();
+  }, []);
+
+  const handleScan = async (scannedCode, isManual = false) => {
+    const code = (typeof scannedCode === 'string' ? scannedCode : "").trim();
+    if (!code) return;
+
+    if (isManual) {
+      try {
+        await fetch(`${API_BASE_URL}/barcode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barcode: code, scanner: "Web UI" })
+        });
+      } catch (err) {
+        console.error("Error recording manual scan:", err);
+      }
     }
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/audit/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionName })
-      });
-      const data = await response.json();
-      setSessionId(data.session._id);
-      setSessionActive(true);
-      setScanCount({});
-      setTotalScans(0);
-      inputRef.current?.focus();
-    } catch (err) {
-      console.error("Error starting audit:", err);
-      alert("Failed to start audit session");
-    }
+    setScanCount((prev) => ({
+      ...prev,
+      [code]: (prev[code] || 0) + 1
+    }));
+    setTotalScans((prev) => prev + 1);
   };
 
-  const handleScan = async () => {
-    const barcode = barcodeInput.trim();
-    if (!barcode) return;
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/audit/scan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, barcode })
-      });
-      const data = await response.json();
-
-      // Update local state
-      setScanCount((prev) => ({
-        ...prev,
-        [barcode]: (prev[barcode] || 0) + 1
-      }));
-      setTotalScans(totalScans + 1);
-      setBarcodeInput("");
-      inputRef.current?.focus();
-    } catch (err) {
-      console.error("Error recording scan:", err);
+  const handleRecordSelected = async () => {
+    if (selectedProducts.size === 0) return;
+    
+    // Process all selected products manually
+    for (const barcode of selectedProducts) {
+      await handleScan(barcode, true);
     }
+    
+    // Clear selection after recording
+    setSelectedProducts(new Set());
   };
 
-  const completeAudit = async () => {
-    try {
-      await fetch(`${API_BASE_URL}/audit/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId })
-      });
-      navigate("/reconciliation", { state: { sessionId } });
-    } catch (err) {
-      console.error("Error completing audit:", err);
-      alert("Failed to complete audit");
-    }
+  const toggleSelection = (barcode) => {
+    setSelectedProducts(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(barcode)) newSet.delete(barcode);
+      else newSet.add(barcode);
+      return newSet;
+    });
+  };
+
+  const completeAudit = () => {
+    navigate("/reconciliation");
   };
 
   return (
@@ -599,74 +724,91 @@ function AuditScanning() {
         <Link to="/" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ Back to Dashboard</Link>
       </div>
 
-      {!sessionActive ? (
-        <div style={{ background: "#fff", padding: 30, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", maxWidth: 500, margin: "0 auto" }}>
-          <h2 style={{ margin: "0 0 20px", color: "#1a1a2e" }}>Start New Audit Session</h2>
-          <div style={{ marginBottom: 20 }}>
-            <label style={{ display: "block", marginBottom: 8, fontWeight: 600, color: "#333" }}>Session Name</label>
-            <input
-              type="text"
-              value={sessionName}
-              onChange={(e) => setSessionName(e.target.value)}
-              placeholder="e.g., Weekly Audit - May 30"
-              style={{ width: "100%", padding: "10px 12px", borderRadius: 5, border: "1px solid #ddd", fontSize: 14, boxSizing: "border-box" }}
-            />
+      <div>
+        <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 15 }}>
+            <div>
+              <h2 style={{ margin: 0, color: "#1a1a2e", fontSize: 18 }}>Global Audit Dashboard</h2>
+              <p style={{ margin: "6px 0 0", color: "#666", fontSize: 13 }}>Live running totals from all scanners</p>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 28, fontWeight: 700, color: "#2e7d32" }}>{totalScans}</div>
+              <div style={{ fontSize: 13, color: "#666" }}>Total Scans (All Time)</div>
+            </div>
           </div>
-          <button
-            onClick={startAudit}
-            style={{ width: "100%", padding: "12px", borderRadius: 5, background: "#2e7d32", color: "#fff", border: "none", cursor: "pointer", fontWeight: 700, fontSize: 16 }}
-          >
-            🚀 Start Audit Session
-          </button>
-        </div>
-      ) : (
-        <div>
-          <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 20 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 15 }}>
-              <div>
-                <h2 style={{ margin: 0, color: "#1a1a2e", fontSize: 18 }}>Active Audit Session</h2>
-                <p style={{ margin: "6px 0 0", color: "#666", fontSize: 13 }}>{sessionName}</p>
-              </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 28, fontWeight: 700, color: "#2e7d32" }}>{totalScans}</div>
-                <div style={{ fontSize: 13, color: "#666" }}>Total Scans</div>
-              </div>
+
+          <hr style={{ border: "none", borderTop: "1px solid #eee", marginBottom: 20 }} />
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ margin: 0, color: "#1a1a2e", fontSize: 16 }}>Audit Progress</h3>
+              <button
+                onClick={handleRecordSelected}
+                disabled={selectedProducts.size === 0}
+                style={{
+                  padding: "8px 16px", borderRadius: 5, background: selectedProducts.size > 0 ? "#1565c0" : "#ccc", 
+                  color: "#fff", border: "none", cursor: selectedProducts.size > 0 ? "pointer" : "not-allowed", 
+                  fontWeight: 600, fontSize: 13
+                }}
+              >
+                📥 Record Selected Scans ({selectedProducts.size})
+              </button>
             </div>
+            
+            <div style={{maxHeight: 400, overflowY: "auto", border: "1px solid #eee", borderRadius: 8 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+                  <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #ddd", textAlign: "left" }}>
+                    <th style={{ padding: "10px 12px", width: "40px", textAlign: "center" }}>☑️</th>
+                    <th style={{ padding: "10px 12px" }}>Product Name</th>
+                    <th style={{ padding: "10px 12px" }}>Barcode</th>
+                    <th style={{ padding: "10px 12px", textAlign: "center" }}>Expected (Phy)</th>
+                    <th style={{ padding: "10px 12px", textAlign: "center" }}>Scanned (Sys)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {products.length === 0 && Object.keys(scanCount).length === 0 ? (
+                    <tr>
+                      <td colSpan="4" style={{ padding: 20, textAlign: "center", color: "#999", fontStyle: "italic" }}>No products in master data. Start scanning!</td>
+                    </tr>
+                  ) : null}
 
-            <div style={{ marginBottom: 15 }}>
-              <input
-                ref={inputRef}
-                type="text"
-                value={barcodeInput}
-                onChange={(e) => setBarcodeInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleScan()}
-                placeholder="Scan barcode here..."
-                autoFocus
-                style={{ width: "100%", padding: "12px", borderRadius: 5, border: "2px solid #1565c0", fontSize: 16, boxSizing: "border-box" }}
-              />
-            </div>
-
-            <button
-              onClick={handleScan}
-              style={{ width: "100%", padding: "10px", borderRadius: 5, background: "#1565c0", color: "#fff", border: "none", cursor: "pointer", fontWeight: 600, marginBottom: 20 }}
-            >
-              Record Scan
-            </button>
-
-            <hr style={{ border: "none", borderTop: "1px solid #eee", marginBottom: 20 }} />
-
-            <h3 style={{ margin: "0 0 12px", color: "#1a1a2e", fontSize: 16 }}>Scanned Barcodes</h3>
-            <div style={{maxHeight: 300, overflowY: "auto" }}>
-              {Object.keys(scanCount).length === 0 ? (
-                <p style={{ color: "#bbb", fontStyle: "italic" }}>No scans yet</p>
-              ) : (
-                Object.entries(scanCount).map(([barcode, count]) => (
-                  <div key={barcode} style={{ padding: "10px", background: "#f5f9ff", borderRadius: 5, marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{barcode}</span>
-                    <span style={{ background: "#1565c0", color: "#fff", padding: "2px 8px", borderRadius: 3, fontWeight: 700, fontSize: 12 }}>×{count}</span>
-                  </div>
-                ))
-              )}
+                  {products.map(p => {
+                    const scanned = scanCount[p.barcode] || 0;
+                    const isComplete = scanned === p.physicalQuantity;
+                    const isOver = scanned > p.physicalQuantity;
+                    const isSelected = selectedProducts.has(p.barcode);
+                    
+                    return (
+                      <tr key={p.barcode} onClick={() => toggleSelection(p.barcode)} style={{ borderBottom: "1px solid #eee", background: isSelected ? "#e3f2fd" : isComplete ? "#e8f5e9" : isOver ? "#ffebee" : "#fff", cursor: "pointer" }}>
+                        <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                          <input type="checkbox" checked={isSelected} readOnly style={{ cursor: "pointer", width: 16, height: 16 }} />
+                        </td>
+                        <td style={{ padding: "10px 12px", fontWeight: 600, color: "#333" }}>
+                          {isComplete && <span style={{ marginRight: 8 }}>✅</span>}
+                          {isOver && <span style={{ marginRight: 8 }}>⚠️</span>}
+                          {p.productName}
+                        </td>
+                        <td style={{ padding: "10px 12px", fontFamily: "monospace", color: "#666" }}>{p.barcode}</td>
+                        <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 600, color: "#555" }}>{p.physicalQuantity}</td>
+                        <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 700, color: scanned > 0 ? (isOver ? "#c62828" : "#2e7d32") : "#bbb", fontSize: 16 }}>
+                          {scanned > 0 ? scanned : "-"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  
+                  {/* Unknown Barcodes (Scanned but not in Master Data) */}
+                  {Object.entries(scanCount).filter(([barcode]) => !products.some(p => p.barcode === barcode)).map(([barcode, count]) => (
+                    <tr key={barcode} style={{ borderBottom: "1px solid #eee", background: "#fff3e0" }}>
+                      <td style={{ padding: "10px 12px", textAlign: "center" }}>-</td>
+                      <td style={{ padding: "10px 12px", fontWeight: 600, color: "#e65100" }}>⚠️ Unknown Product</td>
+                      <td style={{ padding: "10px 12px", fontFamily: "monospace", color: "#666" }}>{barcode}</td>
+                      <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 600, color: "#999" }}>?</td>
+                      <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 700, color: "#e65100", fontSize: 16 }}>{count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
@@ -677,29 +819,19 @@ function AuditScanning() {
             ✅ Complete Audit & View Report
           </button>
         </div>
-      )}
     </div>
   );
 }
 
 // --- RECONCILIATION REPORT COMPONENT ---
 function ReconciliationReport() {
-  const navigate = useNavigate();
-  const location = useLocation();
   const [reportData, setReportData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const sessionId = location.state?.sessionId;
-    if (!sessionId) {
-      alert("No audit session selected");
-      navigate("/audit");
-      return;
-    }
-
     const fetchReport = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/reconciliation/report/${sessionId}`);
+        const response = await fetch(`${API_BASE_URL}/reconciliation/report`);
         const data = await response.json();
         setReportData(data);
         setLoading(false);
@@ -710,21 +842,21 @@ function ReconciliationReport() {
     };
 
     fetchReport();
-  }, [location.state, navigate]);
+  }, []);
 
   if (loading) return <div style={{ padding: 24, textAlign: "center" }}>Loading report...</div>;
-  if (!reportData) return <div style={{ padding: 24, textAlign: "center" }}>No data available</div>;
+  if (!reportData || !reportData.data) return <div style={{ padding: 24, textAlign: "center" }}>No data available</div>;
 
-  const { data, summary, sessionName, createdAt } = reportData;
+  const { data, summary } = reportData;
 
   return (
     <div style={{ padding: 24, minHeight: "100vh", background: "#f0f2f5", fontFamily: "Segoe UI, Tahoma, sans-serif" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
-          <h1 style={{ margin: 0, color: "#1a1a2e", fontWeight: 700 }}>📊 Inventory Reconciliation Report</h1>
-          <p style={{ margin: "6px 0 0", color: "#666" }}>{sessionName} • {new Date(createdAt).toLocaleString()}</p>
+          <h1 style={{ margin: 0, color: "#1a1a2e", fontWeight: 700 }}>📊 Global Inventory Reconciliation</h1>
+          <p style={{ margin: "6px 0 0", color: "#666" }}>Running totals vs Master Data • {new Date().toLocaleString()}</p>
         </div>
-        <Link to="/audit" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ New Audit</Link>
+        <Link to="/audit" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ Back to Audit</Link>
       </div>
 
       <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", overflowX: "auto" }}>
@@ -754,8 +886,8 @@ function ReconciliationReport() {
                   <td style={{ textAlign: "center", padding: 12 }}>₹{item.phyAmt.toLocaleString()}</td>
                   <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{item.sysQty}</td>
                   <td style={{ textAlign: "center", padding: 12 }}>₹{item.sysAmt.toLocaleString()}</td>
-                  <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>{item.diff}</td>
-                  <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>₹{item.diffAmt.toLocaleString()}</td>
+                  <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>{item.diff > 0 ? '+' : ''}{item.diff}</td>
+                  <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>{item.diffAmt > 0 ? '+' : ''}₹{Math.abs(item.diffAmt).toLocaleString()}</td>
                 </tr>
               );
             })}
@@ -768,8 +900,8 @@ function ReconciliationReport() {
               <td style={{ textAlign: "center", padding: 12 }}>₹{summary.totalPhyAmt.toLocaleString()}</td>
               <td style={{ textAlign: "center", padding: 12 }}>{summary.totalSysQty}</td>
               <td style={{ textAlign: "center", padding: 12 }}>₹{summary.totalSysAmt.toLocaleString()}</td>
-              <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty}</td>
-              <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>₹{summary.totalDiffAmt.toLocaleString()}</td>
+              <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</td>
+              <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffAmt > 0 ? '+' : ''}₹{Math.abs(summary.totalDiffAmt).toLocaleString()}</td>
             </tr>
           </tfoot>
         </table>
@@ -796,11 +928,11 @@ function ReconciliationReport() {
           </div>
           <div style={{ background: summary.totalDiffQty === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8 }}>
             <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Diff Qty</div>
-            <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty}</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</div>
           </div>
           <div style={{ background: summary.totalDiffAmt === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8 }}>
             <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Diff Amount</div>
-            <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>₹{summary.totalDiffAmt.toLocaleString()}</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffAmt > 0 ? '+' : ''}₹{Math.abs(summary.totalDiffAmt).toLocaleString()}</div>
           </div>
         </div>
       </div>

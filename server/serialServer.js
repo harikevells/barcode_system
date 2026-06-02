@@ -10,6 +10,26 @@ const cors = require("cors");
 const WSS_PORT = 8080;
 const API_PORT = 5001;
 
+// Simple memory cache for backend de-duplication (prevents MongoDB flooding)
+const recentScans = new Map();
+function isDuplicateScan(barcode) {
+  const now = Date.now();
+  const lastScan = recentScans.get(barcode);
+  if (lastScan && (now - lastScan) < 500) {
+    return true; // Ignore if scanned within 500ms (hardware bounce)
+  }
+  recentScans.set(barcode, now);
+  
+  // Cleanup old entries to prevent memory leak
+  if (recentScans.size > 1000) {
+    const cutoff = now - 5000;
+    for (const [key, timestamp] of recentScans.entries()) {
+      if (timestamp < cutoff) recentScans.delete(key);
+    }
+  }
+  return false;
+}
+
 // --- MongoDB Setup ---
 mongoose.connect("mongodb://127.0.0.1:27017/barcodeDB")
   .then(() => console.log("📦 Connected to MongoDB"))
@@ -52,23 +72,6 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.model("Product", productSchema);
 
-// --- Audit Session Schema ---
-const auditSessionSchema = new mongoose.Schema({
-  sessionName: String,
-  status: { type: String, enum: ["active", "completed"], default: "active" },
-  createdAt: { type: Date, default: Date.now },
-  completedAt: Date,
-  auditScans: [
-    {
-      barcode: String,
-      scanCount: Number,
-      lastScannedAt: Date
-    }
-  ]
-});
-
-const AuditSession = mongoose.model("AuditSession", auditSessionSchema);
-
 // --- Express Setup ---
 const app = express();
 app.use(cors());
@@ -78,16 +81,66 @@ app.use(express.json());
 app.post("/api/scan", async (req, res) => {
   const { barcode } = req.body;
 
+  if (isDuplicateScan(barcode)) {
+    return res.status(200).json({ message: "Ignored duplicate scan" });
+  }
+
   try {
     // Store scan in BCScan collection
     const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
       barcode: barcode,
       timestamp: new Date(),
       source: "web"
     });
     await bcScan.save();
+
+    // Broadcast to Live Dashboard
+    broadcast({
+      source: "serial",
+      port: "Web/API",
+      value: barcode,
+      timestamp: Date.now()
+    });
+
     res.json({ message: "Product added", product: bcScan });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint for Python Raspberry Pi script
+app.post("/api/barcode", async (req, res) => {
+  // Python script might send {"barcode": "...", "scanner": "..."}
+  const barcode = req.body.barcode || req.body.data || Object.keys(req.body)[0];
+  const scannerId = req.body.scanner || req.body.scannerId || "Pi";
+
+  if (isDuplicateScan(barcode)) {
+    return res.status(200).json({ message: "Ignored duplicate scan" });
+  }
+
+  try {
+    // 1. Save to MongoDB so it shows up in Rack History!
+    const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
+      scannerId: isNaN(scannerId) ? null : parseInt(scannerId),
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "API"
+    });
+    await bcScan.save();
+
+    // 2. Broadcast directly to React WebSocket so the UI updates LIVE!
+    broadcast({
+      source: "serial",
+      port: `RaspberryPi (Scanner ${scannerId})`,
+      value: barcode,
+      timestamp: Date.now()
+    });
+
+    res.json({ success: true, message: "Saved and Broadcasted" });
+  } catch (err) {
+    console.error("Error in /api/barcode:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -99,6 +152,7 @@ app.post("/api/manual", async (req, res) => {
   try {
     // Store manual entry in BCScan collection
     const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
       barcode: barcode,
       timestamp: new Date(),
       source: "manual"
@@ -202,10 +256,23 @@ app.get("/api/shelves", async (req, res) => {
 // Clear DB or Session
 app.delete("/api/clear", async (req, res) => {
   try {
-    // Optionally clear DB or just active session
-    // activeShelfData = null;
+    // 1. Clear MongoDB Collections
     await Shelf.deleteMany({});
-    res.json({ message: "Database cleared" });
+    await BCScan.deleteMany({});
+
+    // 2. Clear Local SQLite Database (if it exists on this machine)
+    const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
+    const db = new sqlite3.Database(dbPath, (err) => {
+      if (!err) {
+        db.run("DELETE FROM scans", (deleteErr) => {
+          if (deleteErr) console.error("❌ Failed to clear SQLite DB:", deleteErr);
+          else console.log("🗑️ SQLite DB Cleared");
+          db.close();
+        });
+      }
+    });
+
+    res.json({ message: "All databases (MongoDB & SQLite) cleared completely" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -227,7 +294,7 @@ app.post("/api/products", async (req, res) => {
         physicalQuantity,
         updatedAt: new Date()
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' }
     );
     
     res.json({ message: "Product saved", product });
@@ -259,112 +326,48 @@ app.get("/api/products/:barcode", async (req, res) => {
   }
 });
 
-// Start new audit session
-app.post("/api/audit/start", async (req, res) => {
+// Delete product
+app.delete("/api/products/:id", async (req, res) => {
   try {
-    const { sessionName } = req.body;
-    
-    const session = new AuditSession({
-      sessionName: sessionName || `Audit-${new Date().toLocaleString()}`,
-      status: "active",
-      auditScans: []
+    const product = await Product.findByIdAndDelete(req.params.id);
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    res.json({ message: "Product deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get total scans for all barcodes
+app.get("/api/audit/totals", async (req, res) => {
+  try {
+    const totals = await BCScan.aggregate([
+      { $group: { _id: "$barcode", count: { $sum: 1 } } }
+    ]);
+    const scanCountMap = {};
+    totals.forEach(t => {
+      scanCountMap[t._id] = t.count;
     });
-    
-    await session.save();
-    res.json({ message: "Audit session started", session });
+    res.json(scanCountMap);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get active audit session
-app.get("/api/audit/session/active", async (req, res) => {
+// Get global reconciliation report
+app.get("/api/reconciliation/report", async (req, res) => {
   try {
-    const session = await AuditSession.findOne({ status: "active" }).sort({ createdAt: -1 });
-    if (!session) {
-      return res.status(404).json({ error: "No active audit session" });
-    }
-    res.json(session);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    // 1. Get totals from BCScan
+    const totals = await BCScan.aggregate([
+      { $group: { _id: "$barcode", count: { $sum: 1 } } }
+    ]);
+    const scanCountMap = {};
+    totals.forEach(t => {
+      scanCountMap[t._id] = t.count;
+    });
 
-// Get specific audit session
-app.get("/api/audit/session/:id", async (req, res) => {
-  try {
-    const session = await AuditSession.findById(req.params.id);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-    res.json(session);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Record audit scan
-app.post("/api/audit/scan", async (req, res) => {
-  try {
-    const { sessionId, barcode } = req.body;
-    
-    const session = await AuditSession.findById(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-    
-    // Find or create scan entry for this barcode
-    const existingIndex = session.auditScans.findIndex(s => s.barcode === barcode);
-    
-    if (existingIndex !== -1) {
-      // Increment count if barcode already scanned
-      session.auditScans[existingIndex].scanCount += 1;
-      session.auditScans[existingIndex].lastScannedAt = new Date();
-    } else {
-      // Add new scan entry
-      session.auditScans.push({
-        barcode,
-        scanCount: 1,
-        lastScannedAt: new Date()
-      });
-    }
-    
-    await session.save();
-    res.json({ message: "Scan recorded", session });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Complete audit session
-app.post("/api/audit/complete", async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-    
-    const session = await AuditSession.findByIdAndUpdate(
-      sessionId,
-      {
-        status: "completed",
-        completedAt: new Date()
-      },
-      { new: true }
-    );
-    
-    res.json({ message: "Audit session completed", session });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get reconciliation report
-app.get("/api/reconciliation/report/:sessionId", async (req, res) => {
-  try {
-    const session = await AuditSession.findById(req.params.sessionId);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-    
-    // Build reconciliation data
+    // 2. Build reconciliation data by iterating over all Products
     const reconciliationData = [];
     let totalPhyQty = 0;
     let totalPhyAmt = 0;
@@ -373,45 +376,59 @@ app.get("/api/reconciliation/report/:sessionId", async (req, res) => {
     let totalDiffQty = 0;
     let totalDiffAmt = 0;
     
-    for (const auditScan of session.auditScans) {
-      const product = await Product.findOne({ barcode: auditScan.barcode });
+    const products = await Product.find({});
+    
+    for (const product of products) {
+      const phyQty = product.physicalQuantity || 0;
+      const sysQty = scanCountMap[product.barcode] || 0;
+      const mrp = product.mrp || 0;
       
-      if (product) {
-        const phyQty = product.physicalQuantity;
-        const sysQty = auditScan.scanCount;
-        const mrp = product.mrp;
-        
-        const phyAmt = phyQty * mrp;
-        const sysAmt = sysQty * mrp;
-        const diff = phyQty - sysQty;
-        const diffAmt = diff * mrp;
-        
+      const phyAmt = phyQty * mrp;
+      const sysAmt = sysQty * mrp;
+      const diff = sysQty - phyQty;
+      const diffAmt = diff * mrp;
+      
+      reconciliationData.push({
+        barcode: product.barcode,
+        productName: product.productName,
+        phyQty,
+        mrp,
+        phyAmt,
+        sysQty,
+        sysAmt,
+        diff,
+        diffAmt
+      });
+      
+      totalPhyQty += phyQty;
+      totalPhyAmt += phyAmt;
+      totalSysQty += sysQty;
+      totalSysAmt += sysAmt;
+      totalDiffQty += diff;
+      totalDiffAmt += diffAmt;
+    }
+    
+    // Add any unknown scanned barcodes that aren't in Product DB
+    const knownBarcodes = new Set(products.map(p => p.barcode));
+    for (const [barcode, sysQty] of Object.entries(scanCountMap)) {
+      if (!knownBarcodes.has(barcode)) {
         reconciliationData.push({
-          barcode: auditScan.barcode,
-          productName: product.productName,
-          phyQty,
-          mrp,
-          phyAmt,
+          barcode: barcode,
+          productName: "Unknown Product",
+          phyQty: 0,
+          mrp: 0,
+          phyAmt: 0,
           sysQty,
-          sysAmt,
-          diff,
-          diffAmt
+          sysAmt: 0,
+          diff: sysQty,
+          diffAmt: 0
         });
-        
-        totalPhyQty += phyQty;
-        totalPhyAmt += phyAmt;
         totalSysQty += sysQty;
-        totalSysAmt += sysAmt;
-        totalDiffQty += diff;
-        totalDiffAmt += diffAmt;
+        totalDiffQty += sysQty;
       }
     }
     
     res.json({
-      sessionId: session._id,
-      sessionName: session.sessionName,
-      createdAt: session.createdAt,
-      completedAt: session.completedAt,
       data: reconciliationData,
       summary: {
         totalPhyQty,
