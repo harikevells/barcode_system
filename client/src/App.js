@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from "react-router-dom";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
+import Select from "react-select";
 
 const API_BASE_URL = "http://localhost:5001/api";
 
@@ -265,7 +268,7 @@ function RackHistory() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
-  const [filterScanner, setFilterScanner] = useState("All");
+  const [selectedBarcodes, setSelectedBarcodes] = useState([]);
   const [filterStartDate, setFilterStartDate] = useState("");
   const [filterEndDate, setFilterEndDate] = useState("");
 
@@ -284,13 +287,12 @@ function RackHistory() {
   useEffect(() => {
     fetchHistory();
 
-    // Connect to WebSocket for live real-time updates!
     const ws = new WebSocket("ws://127.0.0.1:8080");
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.source === "serial") {
-          fetchHistory(); // Re-fetch the history the exact moment a scan arrives
+          fetchHistory();
         }
       } catch (e) {}
     };
@@ -298,13 +300,25 @@ function RackHistory() {
     return () => ws.close();
   }, []);
 
-  const filteredData = historyData.filter((item) => {
-    // 1. Scanner Filter
-    if (filterScanner !== "All") {
-      const itemScanner = (item.scannerId ?? "BC").toString();
-      if (itemScanner !== filterScanner) return false;
+  // Compute unique barcodes for the multiselect
+  const barcodeOptions = Array.from(new Set(historyData.map(item => item.barcode)))
+    .map(barcode => ({ value: barcode, label: barcode }));
+
+  const getScannerNumber = (barcode) => {
+    if (!barcode) return null;
+    const char = barcode.charAt(0).toUpperCase();
+    if (char >= 'A' && char <= 'H') {
+      return char.charCodeAt(0) - 64; // A=1, B=2, ..., H=8
     }
-    // 2. Date Filter
+    return null;
+  };
+
+  const scannersToShow = [1, 2];
+
+  const filteredData = historyData.filter((item) => {
+    if (selectedBarcodes.length > 0) {
+      if (!selectedBarcodes.some(b => b.value === item.barcode)) return false;
+    }
     if (filterStartDate) {
       const itemDate = new Date(item.timestamp || item.createdAt);
       const startDate = new Date(filterStartDate);
@@ -335,6 +349,19 @@ function RackHistory() {
     }
   };
 
+  const handleClearHistory = async () => {
+    if (window.confirm("WARNING: This will delete ALL scan history from both MongoDB and the SQLite database. Proceed?")) {
+      try {
+        await fetch(`${API_BASE_URL}/clear`, { method: "DELETE" });
+        alert("All scan history has been cleared successfully.");
+        await fetchHistory();
+      } catch (err) {
+        console.error("Error clearing scan history:", err);
+        alert("Failed to clear scan history.");
+      }
+    }
+  };
+
   return (
     <div style={{ padding: 24, minHeight: "100vh", background: "#f0f2f5", fontFamily: "Segoe UI, Tahoma, sans-serif" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
@@ -347,67 +374,99 @@ function RackHistory() {
           <h2 style={{ margin: "0 0 4px", color: "#1a1a2e", fontSize: 18 }}>Sync & View</h2>
           <p style={{ margin: 0, color: "#666", fontSize: 13 }}>Sync the BC SQLite scans into MongoDB and review the latest data list.</p>
         </div>
-        <button
-          onClick={handleSyncBC}
-          disabled={syncing}
-          style={{ background: syncing ? "#90caf9" : "#1565c0", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, cursor: syncing ? "not-allowed" : "pointer", fontWeight: 700 }}
-        >
-          {syncing ? "Syncing..." : "Sync BC DB → MongoDB"}
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={handleClearHistory}
+            style={{ background: "#c62828", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, cursor: "pointer", fontWeight: 700 }}
+          >
+            🗑️ Clear Scan History
+          </button>
+          <button
+            onClick={handleSyncBC}
+            disabled={syncing}
+            style={{ background: syncing ? "#90caf9" : "#1565c0", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, cursor: syncing ? "not-allowed" : "pointer", fontWeight: 700 }}
+          >
+            {syncing ? "Syncing..." : "Sync BC DB → MongoDB"}
+          </button>
+        </div>
       </div>
 
       <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 15, flexWrap: "wrap", gap: 10 }}>
           <h2 style={{ margin: 0, color: "#1565c0", fontSize: 18 }}>BC Scan History (MongoDB)</h2>
           <div style={{ fontSize: 16, fontWeight: 700, color: "#2e7d32", background: "#e8f5e9", padding: "4px 12px", borderRadius: 20 }}>
-            Total Count: {filteredData.length}
+            Total Count: {historyData.length}
           </div>
         </div>
 
         {/* Filters */}
-        <div style={{ display: "flex", gap: 15, marginBottom: 20, flexWrap: "wrap", background: "#f8f9fa", padding: 15, borderRadius: 8, border: "1px solid #eee" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>Scanner ID</label>
-            <select value={filterScanner} onChange={e => setFilterScanner(e.target.value)} style={{ padding: "6px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }}>
-              <option value="All">All Scanners</option>
-              <option value="1">Scanner 1</option>
-              <option value="2">Scanner 2</option>
-              <option value="BC">BC (Legacy/Sync)</option>
-            </select>
+        <div style={{ display: "flex", gap: 15, marginBottom: 20, flexWrap: "wrap", background: "#f8f9fa", padding: 15, borderRadius: 8, border: "1px solid #eee", alignItems: "flex-end" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 250, flex: 1 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>Barcode Filter</label>
+            <Select
+              isMulti
+              options={barcodeOptions}
+              value={selectedBarcodes}
+              onChange={setSelectedBarcodes}
+              placeholder="Select barcodes..."
+              styles={{ control: (base) => ({ ...base, minHeight: 38, borderRadius: 5 }) }}
+            />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>Start Date</label>
-            <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} style={{ padding: "5px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
+            <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} style={{ padding: "8px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label style={{ fontSize: 12, fontWeight: 600, color: "#555" }}>End Date</label>
-            <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} style={{ padding: "5px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
+            <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} style={{ padding: "8px 10px", borderRadius: 5, border: "1px solid #ccc", fontSize: 14 }} />
           </div>
           <div style={{ display: "flex", alignItems: "flex-end" }}>
-            <button onClick={() => { setFilterScanner("All"); setFilterStartDate(""); setFilterEndDate(""); }} style={{ padding: "6px 14px", borderRadius: 5, border: "1px solid #1565c0", background: "#fff", color: "#1565c0", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Reset Filters</button>
+            <button onClick={() => { setSelectedBarcodes([]); setFilterStartDate(""); setFilterEndDate(""); }} style={{ padding: "8px 14px", borderRadius: 5, border: "1px solid #1565c0", background: "#fff", color: "#1565c0", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Reset Filters</button>
           </div>
         </div>
 
-        {loading ? <p>Loading history...</p> : filteredData.length === 0 ? <p>No matching scan data found.</p> : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
-                <th style={{ textAlign: "left", padding: 12 }}>Scanner</th>
-                <th style={{ textAlign: "left", padding: 12 }}>Barcode</th>
-                <th style={{ textAlign: "left", padding: 12 }}>Timestamp</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredData.map((item) => (
-                <tr key={item._id || `${item.rowId}-${item.timestamp}`} style={{ borderBottom: "1px solid #eee" }}>
-                  <td style={{ padding: 12, fontWeight: 600, color: "#1565c0" }}>{item.scannerId ?? "BC"}</td>
-                  <td style={{ padding: 12, fontFamily: "monospace" }}>{item.barcode}</td>
-                  <td style={{ padding: 12 }}>{new Date(item.timestamp || item.createdAt).toLocaleString()}</td>
+        {loading ? <p>Loading history...</p> : filteredData.length === 0 ? <p>No matching scan data found.</p> : (() => {
+          const scansByScanner = scannersToShow.map(num => 
+            filteredData.filter(item => getScannerNumber(item.barcode) === num)
+          );
+          const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
+
+          return (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
+                  {scannersToShow.map(num => (
+                    <th key={num} style={{ textAlign: "left", padding: 12 }}>Scanner {num}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {Array.from({ length: maxRows }).map((_, rowIndex) => (
+                  <tr key={rowIndex} style={{ borderBottom: "1px solid #eee" }}>
+                    {scannersToShow.map((num, colIdx) => {
+                      const item = scansByScanner[colIdx][rowIndex];
+                      const color = num === 1 ? "#1565c0" : num === 2 ? "#6a1b9a" : "#2e7d32";
+                      return (
+                        <td key={num} style={{ padding: 12 }}>
+                          {item && (
+                            <div style={{ display: "flex", flexDirection: "column" }}>
+                              <span style={{ fontFamily: "monospace", fontWeight: 600, fontSize: 14, color }}>
+                                {item.barcode}
+                              </span>
+                              <span style={{ fontSize: 11, color: "#888", fontWeight: 400, marginTop: 4 }}>
+                                {new Date(item.timestamp || item.createdAt).toLocaleString()}
+                              </span>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          );
+        })()}
       </div>
     </div>
   );
@@ -849,6 +908,70 @@ function ReconciliationReport() {
 
   const { data, summary } = reportData;
 
+  const exportToExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    // 1. Create a sheet with a specific name
+    const sheet = workbook.addWorksheet("Reconciliation Report");
+
+    // 2. Define headers and add them to the sheet
+    const headers = [
+      "Barcode", "Product Name", "Physical Qty", "MRP", 
+      "Physical Amt", "System Qty", "System Amt", "Diff Qty", "Diff Amt"
+    ];
+    sheet.addRow(headers);
+
+    // 3. Format the header row (Bold + Background Color)
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } }; // White font
+    headerRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF1565C0" } // Blue background
+    };
+    headerRow.alignment = { vertical: "middle", horizontal: "center" };
+
+    // 4. Map data rows
+    data.forEach(item => {
+      sheet.addRow([
+        item.barcode,
+        item.productName,
+        item.phyQty,
+        item.mrp,
+        item.phyAmt,
+        item.sysQty,
+        item.sysAmt,
+        item.diff,
+        item.diffAmt
+      ]);
+    });
+
+    // 5. Add a blank row and then the Summary row
+    sheet.addRow([]);
+    const summaryRow = sheet.addRow([
+      "TOTAL", "", summary.totalPhyQty, "", summary.totalPhyAmt, 
+      summary.totalSysQty, summary.totalSysAmt, summary.totalDiffQty, summary.totalDiffAmt
+    ]);
+    
+    // Format Summary row
+    summaryRow.font = { bold: true };
+    summaryRow.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFF8F9FA" } // Light grey background
+    };
+
+    // Auto-fit columns roughly
+    sheet.columns.forEach((column) => {
+      column.width = 15;
+    });
+    sheet.getColumn(2).width = 30; // Product Name wider
+
+    // 6. Generate Excel file and trigger download
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    saveAs(blob, `Reconciliation_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
   return (
     <div style={{ padding: 24, minHeight: "100vh", background: "#f0f2f5", fontFamily: "Segoe UI, Tahoma, sans-serif" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
@@ -856,7 +979,15 @@ function ReconciliationReport() {
           <h1 style={{ margin: 0, color: "#1a1a2e", fontWeight: 700 }}>📊 Global Inventory Reconciliation</h1>
           <p style={{ margin: "6px 0 0", color: "#666" }}>Running totals vs Master Data • {new Date().toLocaleString()}</p>
         </div>
-        <Link to="/audit" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ Back to Audit</Link>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button 
+            onClick={exportToExcel}
+            style={{ padding: "8px 16px", background: "#2e7d32", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: 14 }}
+          >
+            📥 Export to Excel
+          </button>
+          <Link to="/audit" style={{ textDecoration: "none", background: "#1565c0", color: "#fff", padding: "8px 16px", borderRadius: 6, fontWeight: 600 }}>⬅️ Back to Audit</Link>
+        </div>
       </div>
 
       <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", overflowX: "auto" }}>
