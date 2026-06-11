@@ -72,6 +72,39 @@ const productSchema = new mongoose.Schema({
 
 const Product = mongoose.model("Product", productSchema);
 
+// --- Activity Log Schema ---
+const activityLogSchema = new mongoose.Schema({
+  timestamp: { type: Date, default: Date.now },
+  action: { type: String, required: true },
+  productName: { type: String, default: "N/A" },
+  barcode: { type: String, default: "" },
+  previousValue: { type: String, default: "N/A" },
+  updatedValue: { type: String, default: "N/A" },
+  details: { type: String, default: "" },
+  actionType: { type: String, required: true } // "Product Import", "Sales Import", "Manual Update", "Deletion"
+});
+
+const ActivityLog = mongoose.model("ActivityLog", activityLogSchema);
+
+// Helper function to log actions
+async function logActivity(action, productName, previousValue, updatedValue, actionType, barcode = "", details = "") {
+  try {
+    const log = new ActivityLog({
+      action,
+      productName: productName || "N/A",
+      barcode: barcode || "",
+      previousValue: previousValue !== undefined && previousValue !== null ? String(previousValue) : "N/A",
+      updatedValue: updatedValue !== undefined && updatedValue !== null ? String(updatedValue) : "N/A",
+      details: details || (previousValue !== undefined && previousValue !== null && updatedValue !== undefined && updatedValue !== null ? `Qty: ${previousValue} → ${updatedValue}` : ""),
+      actionType
+    });
+    await log.save();
+  } catch (err) {
+    console.error("❌ Failed to log activity:", err);
+  }
+}
+
+
 // --- Express Setup ---
 const app = express();
 app.use(cors());
@@ -285,6 +318,11 @@ app.post("/api/products", async (req, res) => {
   try {
     const { barcode, productName, mrp, physicalQuantity } = req.body;
     
+    // Find existing product to log details
+    const existingProduct = await Product.findOne({ barcode });
+    const isNew = !existingProduct;
+    const previousQty = existingProduct ? existingProduct.physicalQuantity : "N/A";
+    
     const product = await Product.findOneAndUpdate(
       { barcode },
       {
@@ -296,6 +334,10 @@ app.post("/api/products", async (req, res) => {
       },
       { upsert: true, returnDocument: 'after' }
     );
+    
+    // Log the manual update/creation
+    const action = isNew ? "PRODUCT_CREATE" : "PRODUCT_UPDATE";
+    await logActivity(action, productName, previousQty, physicalQuantity, "Manual Update", barcode);
     
     res.json({ message: "Product saved", product });
   } catch (err) {
@@ -329,12 +371,159 @@ app.get("/api/products/:barcode", async (req, res) => {
 // Delete product
 app.delete("/api/products/:id", async (req, res) => {
   try {
-    const product = await Product.findByIdAndDelete(req.params.id);
+    // Find product before deleting to log details
+    const product = await Product.findById(req.params.id);
     if (!product) {
       return res.status(404).json({ error: "Product not found" });
     }
+    
+    await Product.findByIdAndDelete(req.params.id);
+    
+    // Log the deletion
+    await logActivity("PRODUCT_DELETE", product.productName, product.physicalQuantity, "Deleted", "Deletion", product.barcode);
+    
     res.json({ message: "Product deleted successfully" });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all activity logs
+app.get("/api/logs", async (req, res) => {
+  try {
+    const logs = await ActivityLog.find().sort({ timestamp: -1 });
+    res.json(logs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Products
+app.post("/api/products/import", async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: "Invalid body. 'products' array is required." });
+    }
+
+    let processedCount = 0;
+    for (const item of products) {
+      const { barcode, productName, mrp, physicalQuantity } = item;
+      if (!productName) continue; // Skip rows without product name
+
+      // Search by barcode if available, else search by product name
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode });
+      } else {
+        product = await Product.findOne({ productName });
+      }
+
+      const finalBarcode = barcode || product?.barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+      const finalMRP = mrp !== undefined ? mrp : (product?.mrp || 0);
+      const finalQty = physicalQuantity !== undefined ? physicalQuantity : 0;
+
+      if (product) {
+        const previousQty = product.physicalQuantity;
+        // Update product
+        product.productName = productName;
+        product.mrp = finalMRP;
+        product.physicalQuantity = finalQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "PRODUCT_IMPORT_UPDATE",
+          productName,
+          previousQty,
+          finalQty,
+          "Product Import",
+          finalBarcode
+        );
+      } else {
+        // Create product
+        const newProduct = new Product({
+          barcode: finalBarcode,
+          productName,
+          mrp: finalMRP,
+          physicalQuantity: finalQty
+        });
+        await newProduct.save();
+
+        await logActivity(
+          "PRODUCT_IMPORT_CREATE",
+          productName,
+          "N/A",
+          finalQty,
+          "Product Import",
+          finalBarcode
+        );
+      }
+      processedCount++;
+    }
+
+    res.json({ message: `Successfully imported/updated ${processedCount} products.`, count: processedCount });
+  } catch (err) {
+    console.error("Error in bulk product import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Sales
+app.post("/api/sales/import", async (req, res) => {
+  try {
+    const { sales } = req.body;
+    if (!Array.isArray(sales)) {
+      return res.status(400).json({ error: "Invalid body. 'sales' array is required." });
+    }
+
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of sales) {
+      const { barcode, productName, quantity } = item;
+      const soldQty = parseInt(quantity) || 0;
+      if (soldQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - soldQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "SALES_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Sales Import",
+          product.barcode,
+          `Sold: ${soldQty} units`
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} sales transactions.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in sales import:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -444,9 +633,103 @@ app.get("/api/reconciliation/report", async (req, res) => {
   }
 });
 
+// ========== AUDIT SESSION ENDPOINTS ==========
+
+// --- Audit Session Schema ---
+const auditSessionSchema = new mongoose.Schema({
+  auditId: { type: String, required: true, unique: true },
+  name: { type: String, default: "" },
+  startTime: { type: Date, default: Date.now },
+  endTime: { type: Date, default: null },
+  status: { type: String, enum: ["active", "saved", "discarded"], default: "active" },
+  scans: [{ barcode: String, timestamp: Date, scanner: String }],
+  totalScannedItems: { type: Number, default: 0 }
+});
+
+const AuditSession = mongoose.model("AuditSession", auditSessionSchema);
+
+// Start a new audit session
+app.post("/api/audit-sessions", async (req, res) => {
+  try {
+    const auditId = "AUDIT-" + Date.now();
+    const session = new AuditSession({ auditId, status: "active" });
+    await session.save();
+    res.json({ message: "Audit session started", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add a scan to an active session (called when auditActive)
+app.post("/api/audit-sessions/:id/scan", async (req, res) => {
+  try {
+    const { barcode, scanner } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    if (session.status !== "active") return res.status(400).json({ error: "Session is not active" });
+    session.scans.push({ barcode, timestamp: new Date(), scanner: scanner || "unknown" });
+    session.totalScannedItems = session.scans.length;
+    await session.save();
+    res.json({ message: "Scan recorded", totalScannedItems: session.totalScannedItems });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// End / Save an audit session
+app.put("/api/audit-sessions/:id/end", async (req, res) => {
+  try {
+    const { save, name } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    session.endTime = new Date();
+    session.status = save ? "saved" : "discarded";
+    session.name = name || session.auditId;
+    session.totalScannedItems = session.scans.length;
+    await session.save();
+    res.json({ message: save ? "Audit saved successfully" : "Audit discarded", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all saved audit sessions
+app.get("/api/audit-sessions", async (req, res) => {
+  try {
+    const sessions = await AuditSession.find({ status: "saved" })
+      .sort({ startTime: -1 })
+      .select("-scans"); // Exclude scan data for list view (performance)
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single audit session with full scan details
+app.get("/api/audit-sessions/:id", async (req, res) => {
+  try {
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    res.json(session);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete an audit session
+app.delete("/api/audit-sessions/:id", async (req, res) => {
+  try {
+    await AuditSession.findByIdAndDelete(req.params.id);
+    res.json({ message: "Audit session deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(API_PORT, () => {
   console.log(`🌐 API Server running on http://localhost:${API_PORT}`);
 });
+
 
 // --- WebSocket Setup ---
 const wss = new WebSocketServer({ port: WSS_PORT });
