@@ -6,7 +6,7 @@ import Select from "react-select";
 import { BarChartIcon, ClipboardIcon, BoxIcon, ScrollIcon, FileIcon, PlusIcon, DownloadIcon, TrendingDownIcon, UploadIcon, ArrowLeftIcon, SearchIcon, FolderIcon, TrashIcon, LockIcon, EyeIcon, EyeOffIcon } from "./icons";
 
 
-const API_BASE_URL = "http://localhost:5001/api";
+const API_BASE_URL = "http://16.16.123.89:5001/api";
 
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');

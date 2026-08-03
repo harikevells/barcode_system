@@ -1151,6 +1151,10 @@ function openPort(path) {
 
   port.on("error", (err) => {
     console.error(`❌ Port Error (${path}):`, err.message);
+    if (err.message.includes("Permission denied") || err.message.includes("Access denied")) {
+      console.warn(`🚫 Skipping retries for ${path} due to permission issues.`);
+      return;
+    }
     setTimeout(() => {
       if (!port.isOpen) {
         console.log(`🔄 Retrying port ${path}...`);
