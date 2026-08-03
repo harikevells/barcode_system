@@ -1,4 +1,7 @@
 {
   "name": "electron-app",
+  "version": "1.0.0",
+  "author": "Kevells",
+  "description": "Multi Scanner App",
   "main": "main.js"
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from "react-router-dom";
+import { HashRouter as Router, Routes, Route, Link, useNavigate, useLocation } from "react-router-dom";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import Select from "react-select";
@@ -120,9 +120,7 @@ function Login({ onLogin }) {
     <div style={{ display: 'flex', minHeight: '100vh', background: '#fcf2f6', position: 'relative' }}>
       {/* Top Right Logo */}
       <div style={{ position: 'absolute', top: '40px', right: '50px', zIndex: 10 }}>
-        <h2 style={{ fontFamily: "'Righteous', cursive", margin: 0, fontSize: '48px', color: '#1a1a2e', letterSpacing: '1px' }}>
-          Multi <span style={{ color: '#00b14f' }}>scanner app</span>
-        </h2>
+        <img src="./main_logo.png" alt="Inventory Master Logo" style={{ height: "70px", objectFit: "contain" }} />
       </div>
 
       {/* Left Form Panel */}
@@ -179,7 +177,7 @@ function Login({ onLogin }) {
 
       {/* Right Illustration Panel */}
       <div style={{ flex: 1, background: 'transparent', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-        <img src="/login-bg.png" alt="Warehouse Illustration" style={{ maxWidth: '90%', maxHeight: '80vh', objectFit: 'contain' }} />
+        <img src="./login-bg.png" alt="Warehouse Illustration" style={{ maxWidth: '90%', maxHeight: '80vh', objectFit: 'contain' }} />
       </div>
     </div>
   );
@@ -211,9 +209,7 @@ function Header() {
     }}>
       {/* Left: Logo */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <h2 style={{ fontFamily: "'Righteous', cursive", margin: 0, fontSize: '24px', color: '#1a1a2e', letterSpacing: '0.5px' }}>
-          Multi <span style={{ color: '#00b14f' }}>scanner app</span>
-        </h2>
+        <img src="./main_logo.png" alt="Inventory Master Logo" style={{ height: "45px", objectFit: "contain" }} />
       </div>
 
       {/* Center: Nav Pills */}
@@ -286,6 +282,37 @@ function Header() {
           <span><ClipboardIcon size={16} color="#64748b" /></span>
           <span>Logs</span>
         </Link>
+
+        <button
+          onClick={async () => {
+            if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
+              try {
+                await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
+                window.location.reload();
+              } catch (err) {
+                console.error("Error clearing all data:", err);
+              }
+            }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "8px 16px",
+            borderRadius: "20px",
+            border: "none",
+            background: "#7f1d1d",
+            color: "#ffffff",
+            fontWeight: 700,
+            fontSize: "13px",
+            cursor: "pointer",
+            transition: "all 0.2s ease-in-out"
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "#991b1b" }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "#7f1d1d" }}
+        >
+          <TrashIcon size={16} color="#ffffff" /> Clear All Data
+        </button>
 
         <button
           onClick={() => {
@@ -370,14 +397,30 @@ const parseExcelFile = async (file, expectedType) => {
 
 // --- DASHBOARD COMPONENT ---
 function Dashboard() {
-  const [aData, setAData] = useState([]);
-  const [bData, setBData] = useState([]);
+  const [dashboardScans, setDashboardScans] = useState(() => {
+    try {
+      const saved = localStorage.getItem("dashboardScans");
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
   const [lastInputSource, setLastInputSource] = useState("Waiting for scans...");
-  const [scannerAStatus, setScannerAStatus] = useState("Ready");
-  const [scannerBStatus, setScannerBStatus] = useState("Ready");
+  const [scannerStatuses, setScannerStatuses] = useState({});
+  const [serverScannerCount, setServerScannerCount] = useState(2);
 
-  const [manualA, setManualA] = useState("");
-  const [manualB, setManualB] = useState("");
+  useEffect(() => {
+    try {
+      localStorage.setItem("dashboardScans", JSON.stringify(dashboardScans));
+    } catch (e) { }
+  }, [dashboardScans]);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/scanners/count`)
+      .then(res => res.json())
+      .then(data => { if (data && data.count) setServerScannerCount(data.count); })
+      .catch(() => { });
+  }, []);
 
   const lastProcessedCodes = useRef({});
   const wsRef = useRef(null);
@@ -411,9 +454,10 @@ function Dashboard() {
         return;
       }
 
-      if (!upperCode.startsWith("A") && !upperCode.startsWith("B")) {
-        console.warn("Invalid product scan (no A/B prefix):", code);
-        setLastInputSource(`⚠️ Blocked: Missing A/B prefix (${source})`);
+      const firstChar = upperCode.charAt(0);
+      if (firstChar < "A" || firstChar > "Z") {
+        console.warn("Invalid product scan (no scanner prefix A-Z):", code);
+        setLastInputSource(`⚠️ Blocked: Missing scanner prefix (${source})`);
         return;
       }
 
@@ -435,17 +479,12 @@ function Dashboard() {
         console.error("Error saving scan:", err);
       }
 
+      const colNum = firstChar.charCodeAt(0) - 64;
       const timeStr = new Date().toLocaleTimeString();
 
-      if (upperCode.startsWith("A")) {
-        setAData((prev) => [...prev, { value: code, ts: nowTs }]);
-        setLastInputSource(`Scanner A → Column A (${source} @ ${timeStr})`);
-        setScannerAStatus("Active");
-      } else if (upperCode.startsWith("B")) {
-        setBData((prev) => [...prev, { value: code, ts: nowTs }]);
-        setLastInputSource(`Scanner B → Column B (${source} @ ${timeStr})`);
-        setScannerBStatus("Active");
-      }
+      setDashboardScans((prev) => [...prev, { value: code, ts: nowTs, scanner: colNum }]);
+      setLastInputSource(`Scanner ${colNum} → Column ${firstChar} (${source} @ ${timeStr})`);
+      setScannerStatuses((prev) => ({ ...prev, [colNum]: "Active" }));
     };
 
     const connectWS = () => {
@@ -455,7 +494,9 @@ function Dashboard() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.source === "serial") {
+          if (data.source === "system" && data.activeScannersCount) {
+            setServerScannerCount(data.activeScannersCount);
+          } else if (data.source === "serial") {
             processScan(data.value, `Serial:${data.port.split('\\').pop()}`);
           }
         } catch (e) {
@@ -498,8 +539,8 @@ function Dashboard() {
     };
   }, []);
 
-  const handleManualAdd = async (column) => {
-    const barcode = column === "A" ? manualA : manualB;
+  const handleDashboardManualAdd = async (column) => {
+    const barcode = (manualInputs[column] || "").trim();
     if (!barcode) return;
 
     if (!barcode.toUpperCase().startsWith(column)) {
@@ -515,13 +556,9 @@ function Dashboard() {
       });
 
       const nowTs = Date.now();
-      if (column === "A") {
-        setAData((prev) => [...prev, { value: barcode, ts: nowTs }]);
-        setManualA("");
-      } else {
-        setBData((prev) => [...prev, { value: barcode, ts: nowTs }]);
-        setManualB("");
-      }
+      const colNum = column.charCodeAt(0) - 64;
+      setDashboardScans((prev) => [...prev, { value: barcode, ts: nowTs, scanner: colNum }]);
+      setManualInputs((prev) => ({ ...prev, [column]: "" }));
       setLastInputSource(`Manual → Column ${column}: ${barcode}`);
     } catch (err) {
       console.error("Error adding manual barcode:", err);
@@ -537,6 +574,19 @@ function Dashboard() {
         setLastInputSource("Database and UI Cleared.");
       } catch (err) {
         console.error("Error clearing data:", err);
+      }
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
+      try {
+        await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
+        setAData([]);
+        setBData([]);
+        setLastInputSource("All Databases and UI Cleared.");
+      } catch (err) {
+        console.error("Error clearing all data:", err);
       }
     }
   };
@@ -578,46 +628,70 @@ function Dashboard() {
         </div>
 
         {/* Status Banner */}
-        <div style={{ marginBottom: 24, padding: "16px 24px", background: "#fff", border: "1px solid #f1f5f9", borderRadius: 16, boxShadow: "0 4px 20px rgba(0,0,0,0.02)", display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+        <div style={{ marginBottom: 24, padding: "16px 24px", background: "#fff", border: "1px solid #f1f5f9", borderRadius: 16, boxShadow: "0 4px 20px rgba(0,0,0,0.02)", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <span style={{ background: wsStatus === "Connected" ? "#e2f0d9" : "#fce8e6", color: wsStatus === "Connected" ? "#2e7d32" : "#c62828", borderRadius: "12px", padding: "4px 12px", fontSize: 13, fontWeight: 700 }}>Serial Server: {wsStatus}</span>
           <div style={{ color: "#e2e8f0" }}>|</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}><StatusDot status={scannerAStatus} /><span style={{ fontWeight: 700, color: "#1565c0" }}>Scanner A</span></div>
-          <div style={{ color: "#e2e8f0" }}>|</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}><StatusDot status={scannerBStatus} /><span style={{ fontWeight: 700, color: "#6a1b9a" }}>Scanner B</span></div>
+          {scannersToShow.map(num => {
+            const col = String.fromCharCode(64 + num);
+            const accentColor = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
+            const status = scannerStatuses[num] || "Ready";
+            return (
+              <React.Fragment key={num}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <StatusDot status={status} />
+                  <span style={{ fontWeight: 700, color: accentColor }}>Scanner {num} ({col})</span>
+                </div>
+                <div style={{ color: "#e2e8f0" }}>|</div>
+              </React.Fragment>
+            );
+          })}
           <span style={{ color: "#64748b", marginLeft: "auto", fontSize: 13, fontWeight: 500 }}>{lastInputSource}</span>
           <button onClick={handleClear} className="btn btn-danger" style={{ padding: "6px 14px", fontSize: 13, borderRadius: "8px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrashIcon size={16} /> CLEAR DB</span></button>
         </div>
 
         <div style={{ display: "flex", gap: 24, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ ...panelStyle, border: "1px solid #f1f5f9", borderRadius: "16px", padding: "24px" }}>
-            <h2 style={{ margin: "0 0 14px", color: "#1565c0", fontSize: 18, fontWeight: 700 }}>Column A <span style={{ fontSize: 13, color: "#64748b", fontWeight: 500 }}>({aData.length} scans)</span></h2>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              <input type="text" value={manualA} onChange={(e) => setManualA(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleManualAdd("A")} placeholder="Manual entry for A..." style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13 }} />
-              <button onClick={() => handleManualAdd("A")} className="btn btn-primary" style={{ padding: "10px 16px", borderRadius: 8 }}>Add</button>
-            </div>
-            <hr style={{ border: "none", borderTop: "1px solid #f1f5f9", marginBottom: 16 }} />
-            {aData.length === 0 ? <p style={{ color: "#94a3b8", fontStyle: "italic", textAlign: "center" }}>No scans yet.</p> : aData.map((d, i) => (
-              <div key={`a-${i}`} style={{ margin: "6px 0", padding: "10px 14px", background: "#f5f9ff", borderRadius: 8, fontFamily: "monospace", fontSize: 14, display: "flex", justifyContent: "space-between", border: "1px solid #e0efff" }}>
-                <span><strong style={{ color: "#94a3b8", marginRight: 8 }}>{i + 1}.</strong>{d.value}</span>
-                <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{new Date(d.ts).toLocaleTimeString()}</span>
-              </div>
-            ))}
-          </div>
+          {scannersToShow.map((num) => {
+            const col = String.fromCharCode(64 + num);
+            const accentColor = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
+            const columnScans = dashboardScans.filter(d => d.scanner === num);
+            const manualVal = manualInputs[col] || "";
 
-          <div style={{ ...panelStyle, border: "1px solid #f1f5f9", borderRadius: "16px", padding: "24px" }}>
-            <h2 style={{ margin: "0 0 14px", color: "#6a1b9a", fontSize: 18, fontWeight: 700 }}>Column B <span style={{ fontSize: 13, color: "#64748b", fontWeight: 500 }}>({bData.length} scans)</span></h2>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              <input type="text" value={manualB} onChange={(e) => setManualB(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleManualAdd("B")} placeholder="Manual entry for B..." style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13 }} />
-              <button onClick={() => handleManualAdd("B")} className="btn" style={{ padding: "10px 16px", borderRadius: 8, background: "#6a1b9a", color: "white" }}>Add</button>
-            </div>
-            <hr style={{ border: "none", borderTop: "1px solid #f1f5f9", marginBottom: 16 }} />
-            {bData.length === 0 ? <p style={{ color: "#94a3b8", fontStyle: "italic", textAlign: "center" }}>No scans yet.</p> : bData.map((d, i) => (
-              <div key={`b-${i}`} style={{ margin: "6px 0", padding: "10px 14px", background: "#fdf5ff", borderRadius: 8, fontFamily: "monospace", fontSize: 14, display: "flex", justifyContent: "space-between", border: "1px solid #fae8ff" }}>
-                <span><strong style={{ color: "#94a3b8", marginRight: 8 }}>{i + 1}.</strong>{d.value}</span>
-                <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{new Date(d.ts).toLocaleTimeString()}</span>
+            return (
+              <div key={num} style={{ ...panelStyle, border: "1px solid #f1f5f9", borderRadius: "16px", padding: "24px" }}>
+                <h2 style={{ margin: "0 0 14px", color: accentColor, fontSize: 18, fontWeight: 700 }}>
+                  Scanner {num} (Column {col}) <span style={{ fontSize: 13, color: "#64748b", fontWeight: 500 }}>({columnScans.length} scans)</span>
+                </h2>
+                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                  <input
+                    type="text"
+                    value={manualVal}
+                    onChange={(e) => setManualInputs(prev => ({ ...prev, [col]: e.target.value }))}
+                    onKeyDown={(e) => e.key === "Enter" && handleDashboardManualAdd(col)}
+                    placeholder={`Manual entry for ${col}...`}
+                    style={{ flex: 1, padding: "10px 12px", borderRadius: 8, border: `1px solid ${accentColor}40`, fontSize: 13, outline: "none" }}
+                  />
+                  <button
+                    onClick={() => handleDashboardManualAdd(col)}
+                    className="btn"
+                    style={{ padding: "10px 16px", borderRadius: 8, background: accentColor, color: "white", border: "none", cursor: "pointer", fontWeight: 700 }}
+                  >
+                    Add
+                  </button>
+                </div>
+                <hr style={{ border: "none", borderTop: "1px solid #f1f5f9", marginBottom: 16 }} />
+                {columnScans.length === 0 ? (
+                  <p style={{ color: "#94a3b8", fontStyle: "italic", textAlign: "center" }}>No scans yet.</p>
+                ) : (
+                  columnScans.map((d, i) => (
+                    <div key={`col-${col}-${i}`} style={{ margin: "6px 0", padding: "10px 14px", background: `${accentColor}08`, borderRadius: 8, fontFamily: "monospace", fontSize: 14, display: "flex", justifyContent: "space-between", border: `1px solid ${accentColor}20` }}>
+                      <span><strong style={{ color: "#94a3b8", marginRight: 8 }}>{i + 1}.</strong>{d.value}</span>
+                      <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{new Date(d.ts).toLocaleTimeString()}</span>
+                    </div>
+                  ))
+                )}
               </div>
-            ))}
-          </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -628,12 +702,33 @@ function Dashboard() {
 function RackHistory() {
   const navigate = useNavigate();
   const [activeSession, setActiveSession] = useState(null);
-  const [sessionScans, setSessionScans] = useState([]);
+  const [sessionScans, setSessionScans] = useState(() => {
+    try {
+      const saved = localStorage.getItem("sessionScans");
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("sessionScans", JSON.stringify(sessionScans));
+    } catch (e) { }
+  }, [sessionScans]);
 
   const [selectedBarcodes, setSelectedBarcodes] = useState([]);
 
-  const [manualA, setManualA] = useState("");
-  const [manualB, setManualB] = useState("");
+  const [manualInputs, setManualInputs] = useState({});
+  const [manualScannerCount, setManualScannerCount] = useState(null);
+  const [serverScannerCount, setServerScannerCount] = useState(2);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/scanners/count`)
+      .then(res => res.json())
+      .then(data => { if (data && data.count) setServerScannerCount(data.count); })
+      .catch(() => { });
+  }, []);
 
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -650,11 +745,13 @@ function RackHistory() {
     ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.source === "serial") {
+        if (data.source === "system" && data.activeScannersCount) {
+          setServerScannerCount(data.activeScannersCount);
+        } else if (data.source === "serial") {
           const currentSession = activeSessionRef.current;
           if (currentSession && currentSession.status === "active") {
             const scannerChar = data.value.charAt(0).toUpperCase();
-            const col = scannerChar === 'A' ? 1 : scannerChar === 'B' ? 2 : 0;
+            const col = (scannerChar >= 'A' && scannerChar <= 'Z') ? (scannerChar.charCodeAt(0) - 64) : 1;
             fetch(`${API_BASE_URL}/audit-sessions/${currentSession._id}/scan`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -674,6 +771,10 @@ function RackHistory() {
       const data = await res.json();
       setActiveSession(data.session);
       setSessionScans([]);
+      try {
+        localStorage.setItem("activeSession", JSON.stringify(data.session));
+        localStorage.setItem("sessionScans", JSON.stringify([]));
+      } catch (e) { }
     } catch (err) {
       console.error(err);
       alert("Failed to start audit.");
@@ -685,15 +786,15 @@ function RackHistory() {
       alert("Please start an audit session first to scan barcodes.");
       return;
     }
-    const barcode = column === "A" ? manualA : manualB;
-    if (!barcode.trim()) return;
+    const barcode = (manualInputs[column] || "").trim();
+    if (!barcode) return;
 
     if (!barcode.toUpperCase().startsWith(column)) {
       alert(`Manual entry for Column ${column} must start with "${column}"!`);
       return;
     }
 
-    const colNum = column === "A" ? 1 : 2;
+    const colNum = column.charCodeAt(0) - 64;
 
     try {
       await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}/scan`, {
@@ -702,7 +803,7 @@ function RackHistory() {
         body: JSON.stringify({ barcode, scanner: String(colNum) })
       });
       setSessionScans(prev => [...prev, { barcode, timestamp: new Date(), scanner: String(colNum) }]);
-      if (column === "A") setManualA(""); else setManualB("");
+      setManualInputs(prev => ({ ...prev, [column]: "" }));
     } catch (err) {
       console.error("Error adding manual barcode:", err);
       alert("Failed to add barcode.");
@@ -712,6 +813,11 @@ function RackHistory() {
   const handleClearHistory = () => {
     if (window.confirm("Clear all scanned barcodes in the current session?")) {
       setSessionScans([]);
+      setActiveSession(null);
+      try {
+        localStorage.removeItem("activeSession");
+        localStorage.removeItem("sessionScans");
+      } catch (e) { }
     }
   };
 
@@ -724,16 +830,66 @@ function RackHistory() {
       await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}/end`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ save: true, name: auditName })
+        body: JSON.stringify({ save: true, name: auditName, scans: sessionScans })
       });
       setShowSaveModal(false);
       setActiveSession(null);
       setSessionScans([]);
       setAuditName("");
+      try {
+        localStorage.removeItem("activeSession");
+        localStorage.removeItem("sessionScans");
+      } catch (e) { }
       alert("Audit saved successfully.");
     } catch (err) {
       console.error(err);
       alert("Failed to save audit.");
+    }
+  };
+
+  const handleConfirmDiscard = async () => {
+    try {
+      if (activeSession) {
+        await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}/end`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ save: false })
+        });
+      }
+    } catch (err) {
+      console.error("Error discarding audit:", err);
+    } finally {
+      setShowEndModal(false);
+      setActiveSession(null);
+      setSessionScans([]);
+      try {
+        localStorage.removeItem("activeSession");
+        localStorage.removeItem("sessionScans");
+      } catch (e) { }
+    }
+  };
+
+  const handleDeleteScan = async (itemToDelete) => {
+    setSessionScans(prev => {
+      const idx = prev.findIndex(item => item === itemToDelete || (item.barcode === itemToDelete.barcode && new Date(item.timestamp).getTime() === new Date(itemToDelete.timestamp).getTime()));
+      if (idx !== -1) {
+        const updated = [...prev];
+        updated.splice(idx, 1);
+        return updated;
+      }
+      return prev;
+    });
+
+    if (activeSession) {
+      try {
+        await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}/scan`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ barcode: itemToDelete.barcode })
+        });
+      } catch (err) {
+        console.error("Error deleting scan from backend:", err);
+      }
     }
   };
 
@@ -747,16 +903,27 @@ function RackHistory() {
     return true;
   });
 
+  const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
+
   const getScannerNumber = (barcode) => {
     if (!barcode) return null;
     const char = barcode.charAt(0).toUpperCase();
-    if (char >= 'A' && char <= 'H') {
+    if (char >= 'A' && char <= 'Z') {
       return char.charCodeAt(0) - 64;
     }
     return null;
   };
 
-  const scannersToShow = [1, 2];
+  const detectedNums = Array.from(
+    new Set(
+      sessionScans
+        .map(item => getScannerNumber(item.barcode))
+        .filter(n => n !== null)
+    )
+  );
+  const autoCount = Math.max(serverScannerCount, ...detectedNums);
+  const maxScannerNum = manualScannerCount || autoCount;
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   const scansByScanner = scannersToShow.map(num =>
     filteredData.filter(item => getScannerNumber(item.barcode) === num)
@@ -796,13 +963,44 @@ function RackHistory() {
               </button>
             </div>
 
-            <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <select
+                value={manualScannerCount || "auto"}
+                onChange={(e) => setManualScannerCount(e.target.value === "auto" ? null : Number(e.target.value))}
+                title="Select number of scanner columns"
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 20,
+                  border: "1px solid #cbd5e1",
+                  background: "#f8fafc",
+                  fontWeight: 700,
+                  fontSize: 14,
+                  color: "#1e293b",
+                  cursor: "pointer",
+                  outline: "none"
+                }}
+              >
+                <option value="auto">Auto ({autoCount} Active Scanners)</option>
+                <option value={2}>2 Scanners</option>
+                <option value={3}>3 Scanners</option>
+                <option value={4}>4 Scanners</option>
+                <option value={5}>5 Scanners</option>
+                <option value={6}>6 Scanners</option>
+                <option value={8}>8 Scanners</option>
+              </select>
               <button
                 onClick={handleStartAudit}
                 disabled={activeSession !== null}
                 style={{
                   background: activeSession ? "#a5d6a7" : "linear-gradient(180deg, #66bb6a 0%, #43a047 100%)",
-                  color: "#fff", border: "none", padding: "10px 20px", borderRadius: 20, cursor: activeSession ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 15
+                  color: "#fff",
+                  border: "none",
+                  padding: "10px 20px",
+                  borderRadius: 20,
+                  cursor: activeSession ? "not-allowed" : "pointer",
+                  fontWeight: 700,
+                  fontSize: 15,
+                  opacity: activeSession ? 0.6 : 1
                 }}
               >
                 Start Audit
@@ -812,7 +1010,14 @@ function RackHistory() {
                 disabled={!activeSession}
                 style={{
                   background: !activeSession ? "#ef9a9a" : "linear-gradient(180deg, #ef5350 0%, #d32f2f 100%)",
-                  color: "#fff", border: "none", padding: "10px 20px", borderRadius: 20, cursor: !activeSession ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 15
+                  color: "#fff",
+                  border: "none",
+                  padding: "10px 20px",
+                  borderRadius: 20,
+                  cursor: !activeSession ? "not-allowed" : "pointer",
+                  fontWeight: 700,
+                  fontSize: 15,
+                  opacity: !activeSession ? 0.6 : 1
                 }}
               >
                 End Audit
@@ -820,80 +1025,109 @@ function RackHistory() {
             </div>
           </div>
 
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
-                {scannersToShow.map(num => {
-                  const col = String.fromCharCode(64 + num);
-                  const manualVal = col === "A" ? manualA : manualB;
-                  const setManual = col === "A" ? setManualA : setManualB;
-                  const accentColor = num === 1 ? "#1565c0" : "#6a1b9a";
-                  return (
-                    <th key={num} style={{ textAlign: "left", padding: "10px 12px", width: "50%" }}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        <span style={{ fontWeight: 700, color: accentColor }}>Scanner {num}</span>
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <input
-                            type="text"
-                            value={manualVal}
-                            onChange={e => setManual(e.target.value)}
-                            onKeyDown={e => e.key === "Enter" && handleManualAdd(col)}
-                            placeholder={`Manual entry for ${col}...`}
-                            disabled={!activeSession}
-                            style={{
-                              flex: 1, padding: "7px 10px", borderRadius: 8, border: `1px solid ${accentColor}40`,
-                              fontSize: 13, outline: "none", background: !activeSession ? "#f1f5f9" : "#fff", fontFamily: "monospace"
-                            }}
-                          />
-                          <button
-                            onClick={() => handleManualAdd(col)}
-                            disabled={!activeSession}
-                            style={{
-                              padding: "7px 14px", borderRadius: 8, background: !activeSession ? "#94a3b8" : accentColor,
-                              color: "#fff", border: "none", cursor: !activeSession ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 13
-                            }}
-                          >
-                            Add
-                          </button>
-                        </div>
-                      </div>
-                    </th>
-                  );
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {maxRows === 0 && (
-                <tr>
-                  <td colSpan={2} style={{ textAlign: "center", padding: 20, color: "#64748b" }}>
-                    {!activeSession ? "Click 'Start Audit' to begin scanning." : "Ready to scan... awaiting barcodes."}
-                  </td>
-                </tr>
-              )}
-              {Array.from({ length: maxRows }).map((_, rowIndex) => (
-                <tr key={rowIndex} style={{ borderBottom: "1px solid #eee" }}>
-                  {scannersToShow.map((num, colIdx) => {
-                    const item = scansByScanner[colIdx][rowIndex];
-                    const color = num === 1 ? "#1565c0" : "#6a1b9a";
+          <div style={{ overflowX: "auto", width: "100%", borderRadius: 8 }}>
+            <table style={{ width: "100%", minWidth: `${Math.max(800, scannersToShow.length * 270)}px`, borderCollapse: "collapse", fontSize: 14, tableLayout: "fixed" }}>
+              <thead>
+                <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
+                  {scannersToShow.map(num => {
+                    const col = String.fromCharCode(64 + num);
+                    const manualVal = manualInputs[col] || "";
+                    const accentColor = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
                     return (
-                      <td key={num} style={{ padding: 12 }}>
-                        {item && (
-                          <div style={{ display: "flex", flexDirection: "column" }}>
-                            <span style={{ fontFamily: "monospace", fontWeight: 600, fontSize: 14, color }}>
-                              {item.barcode}
-                            </span>
-                            <span style={{ fontSize: 11, color: "#888", fontWeight: 400, marginTop: 4 }}>
-                              {new Date(item.timestamp).toLocaleString()}
-                            </span>
+                      <th key={num} style={{ textAlign: "left", padding: "10px 12px", width: `${100 / scannersToShow.length}%` }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <span style={{ fontWeight: 700, color: accentColor }}>Scanner {num}</span>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <input
+                              type="text"
+                              value={manualVal}
+                              onChange={e => setManualInputs(prev => ({ ...prev, [col]: e.target.value }))}
+                              onKeyDown={e => e.key === "Enter" && handleManualAdd(col)}
+                              placeholder={`Manual entry for ${col}...`}
+                              disabled={!activeSession}
+                              style={{
+                                flex: 1, padding: "7px 10px", borderRadius: 8, border: `1px solid ${accentColor}40`,
+                                fontSize: 13, outline: "none", background: !activeSession ? "#f1f5f9" : "#fff", fontFamily: "monospace"
+                              }}
+                            />
+                            <button
+                              onClick={() => handleManualAdd(col)}
+                              disabled={!activeSession}
+                              style={{
+                                padding: "7px 14px", borderRadius: 8, background: !activeSession ? "#94a3b8" : accentColor,
+                                color: "#fff", border: "none", cursor: !activeSession ? "not-allowed" : "pointer", fontWeight: 700, fontSize: 13
+                              }}
+                            >
+                              Add
+                            </button>
                           </div>
-                        )}
-                      </td>
+                        </div>
+                      </th>
                     );
                   })}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {maxRows === 0 && (
+                  <tr>
+                    <td colSpan={scannersToShow.length} style={{ textAlign: "center", padding: 20, color: "#64748b" }}>
+                      {!activeSession ? "Click 'Start Audit' to begin scanning." : "Ready to scan... awaiting barcodes."}
+                    </td>
+                  </tr>
+                )}
+                {Array.from({ length: maxRows }).map((_, rowIndex) => (
+                  <tr key={rowIndex} style={{ borderBottom: "1px solid #eee" }}>
+                    {scannersToShow.map((num, colIdx) => {
+                      const item = scansByScanner[colIdx][rowIndex];
+                      const color = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
+                      return (
+                        <td key={num} style={{ padding: "10px 12px", verticalAlign: "middle" }}>
+                          {item && (
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <div style={{ display: "flex", flexDirection: "column" }}>
+                                <span style={{ fontFamily: "monospace", fontWeight: 600, fontSize: 14, color }}>
+                                  {item.barcode}
+                                </span>
+                                <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400, marginTop: 2 }}>
+                                  {new Date(item.timestamp).toLocaleString()}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => handleDeleteScan(item)}
+                                title="Delete scan entry"
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  color: "#94a3b8",
+                                  padding: 6,
+                                  borderRadius: 6,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  transition: "all 0.15s ease"
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.color = "#ef5350";
+                                  e.currentTarget.style.background = "#fee2e2";
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.color = "#94a3b8";
+                                  e.currentTarget.style.background = "none";
+                                }}
+                              >
+                                <TrashIcon size={15} />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -907,7 +1141,7 @@ function RackHistory() {
             <h2 style={{ margin: "20px 0 30px", fontSize: 22, color: "#1a1a2e" }}>Do You Want To Save?</h2>
             <div style={{ display: "flex", justifyContent: "center", gap: 20 }}>
               <button onClick={() => { setShowEndModal(false); setShowSaveModal(true); }} style={{ background: "#00b050", color: "#fff", border: "none", padding: "10px 40px", borderRadius: 6, fontSize: 18, cursor: "pointer", fontWeight: 600 }}>Yes</button>
-              <button onClick={() => setShowEndModal(false)} style={{ background: "#f04e4e", color: "#fff", border: "none", padding: "10px 40px", borderRadius: 6, fontSize: 18, cursor: "pointer", fontWeight: 600 }}>No</button>
+              <button onClick={handleConfirmDiscard} style={{ background: "#f04e4e", color: "#fff", border: "none", padding: "10px 40px", borderRadius: 6, fontSize: 18, cursor: "pointer", fontWeight: 600 }}>No</button>
             </div>
           </div>
         </div>
@@ -1043,18 +1277,43 @@ function AuditDetails() {
 
   const scans = audit.scans || [];
 
+  const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
+
   const getScannerNumber = (barcode) => {
     if (!barcode) return null;
     const char = barcode.charAt(0).toUpperCase();
-    if (char >= 'A' && char <= 'H') return char.charCodeAt(0) - 64;
+    if (char >= 'A' && char <= 'Z') return char.charCodeAt(0) - 64;
     return null;
   };
 
-  const scannersToShow = [1, 2];
+  const detectedNums = Array.from(
+    new Set(
+      scans
+        .map(item => getScannerNumber(item.barcode))
+        .filter(n => n !== null)
+    )
+  );
+  const maxScannerNum = Math.max(2, ...detectedNums);
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
   const scansByScanner = scannersToShow.map(num =>
     scans.filter(item => getScannerNumber(item.barcode) === num)
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
+
+  const handleDeleteAuditDetailScan = async (itemToDelete) => {
+    const updatedScans = scans.filter(item => item !== itemToDelete && !(item.barcode === itemToDelete.barcode && new Date(item.timestamp).getTime() === new Date(itemToDelete.timestamp).getTime()));
+    setAudit(prev => ({ ...prev, scans: updatedScans }));
+
+    try {
+      await fetch(`${API_BASE_URL}/audit-sessions/${audit._id}/scans`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scans: updatedScans })
+      });
+    } catch (err) {
+      console.error("Failed to delete scan in AuditDetails:", err);
+    }
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
@@ -1071,51 +1330,81 @@ function AuditDetails() {
         </div>
 
         <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 18 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
-            <thead>
-              <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
-                {scannersToShow.map(num => {
-                  const accentColor = num === 1 ? "#1565c0" : "#6a1b9a";
-                  return (
-                    <th key={num} style={{ textAlign: "left", padding: "12px", width: "50%" }}>
-                      <span style={{ fontWeight: 700, color: accentColor }}>Scanner {num} ({scansByScanner[num - 1].length} items)</span>
-                    </th>
-                  );
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {maxRows === 0 && (
-                <tr>
-                  <td colSpan={2} style={{ textAlign: "center", padding: 20, color: "#64748b" }}>
-                    No scans recorded in this session.
-                  </td>
-                </tr>
-              )}
-              {Array.from({ length: maxRows }).map((_, rowIndex) => (
-                <tr key={rowIndex} style={{ borderBottom: "1px solid #eee" }}>
+          <div style={{ overflowX: "auto", width: "100%", borderRadius: 8 }}>
+            <table style={{ width: "100%", minWidth: `${Math.max(800, scannersToShow.length * 270)}px`, borderCollapse: "collapse", fontSize: 14, tableLayout: "fixed" }}>
+              <thead>
+                <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
                   {scannersToShow.map((num, colIdx) => {
-                    const item = scansByScanner[colIdx][rowIndex];
-                    const color = num === 1 ? "#1565c0" : "#6a1b9a";
+                    const accentColor = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
                     return (
-                      <td key={num} style={{ padding: 12 }}>
-                        {item && (
-                          <div style={{ display: "flex", flexDirection: "column" }}>
-                            <span style={{ fontFamily: "monospace", fontWeight: 600, fontSize: 14, color }}>
-                              {item.barcode}
-                            </span>
-                            <span style={{ fontSize: 11, color: "#888", fontWeight: 400, marginTop: 4 }}>
-                              {new Date(item.timestamp).toLocaleString()}
-                            </span>
-                          </div>
-                        )}
-                      </td>
+                      <th key={num} style={{ textAlign: "left", padding: "12px", width: `${100 / scannersToShow.length}%` }}>
+                        <span style={{ fontWeight: 700, color: accentColor }}>Scanner {num} ({scansByScanner[colIdx]?.length || 0} items)</span>
+                      </th>
                     );
                   })}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {maxRows === 0 && (
+                  <tr>
+                    <td colSpan={scannersToShow.length} style={{ textAlign: "center", padding: 20, color: "#64748b" }}>
+                      No scans recorded in this session.
+                    </td>
+                  </tr>
+                )}
+                {Array.from({ length: maxRows }).map((_, rowIndex) => (
+                  <tr key={rowIndex} style={{ borderBottom: "1px solid #eee" }}>
+                    {scannersToShow.map((num, colIdx) => {
+                      const item = scansByScanner[colIdx][rowIndex];
+                      const color = SCANNER_COLORS[(num - 1) % SCANNER_COLORS.length];
+                      return (
+                        <td key={num} style={{ padding: "10px 12px", verticalAlign: "middle" }}>
+                          {item && (
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <div style={{ display: "flex", flexDirection: "column" }}>
+                                <span style={{ fontFamily: "monospace", fontWeight: 600, fontSize: 14, color }}>
+                                  {item.barcode}
+                                </span>
+                                <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 400, marginTop: 2 }}>
+                                  {new Date(item.timestamp).toLocaleString()}
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => handleDeleteAuditDetailScan(item)}
+                                title="Delete scan entry"
+                                style={{
+                                  background: "none",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  color: "#94a3b8",
+                                  padding: 6,
+                                  borderRadius: 6,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  transition: "all 0.15s ease"
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.color = "#ef5350";
+                                  e.currentTarget.style.background = "#fee2e2";
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.color = "#94a3b8";
+                                  e.currentTarget.style.background = "none";
+                                }}
+                              >
+                                <TrashIcon size={15} />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -1137,6 +1426,7 @@ function ProductManagement() {
 
   const importProductsRef = useRef(null);
   const importSalesRef = useRef(null);
+  const receivedStockRef = useRef(null);
 
   const handleImportProducts = async (e) => {
     const file = e.target.files?.[0];
@@ -1196,6 +1486,43 @@ function ProductManagement() {
     } catch (err) {
       console.error(err);
       alert("Error reading/importing Excel file: " + err.message);
+    } finally {
+      setLoading(false);
+      e.target.value = ""; // Reset file input
+    }
+  };
+
+  const handleReceivedStock = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setLoading(true);
+      const parsedRows = await parseExcelFile(file, "products");
+
+      const response = await fetch(`${API_BASE_URL}/products/received-stock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ products: parsedRows })
+      });
+
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const resData = await response.json();
+        if (response.ok) {
+          alert(resData.message || "Received stock processed successfully!");
+          await fetchProducts();
+        } else {
+          alert(resData.error || "Failed to import received stock.");
+        }
+      } else {
+        const rawText = await response.text();
+        console.error("Non-JSON Server response:", rawText);
+        alert(`Server error (${response.status}): Please restart the backend server so the new API route is loaded.`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error reading/importing Received Stock Excel file: " + err.message);
     } finally {
       setLoading(false);
       e.target.value = ""; // Reset file input
@@ -1368,6 +1695,22 @@ function ProductManagement() {
             disabled={loading}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Import Sales</span>
+          </button>
+
+          <input
+            type="file"
+            accept=".xlsx, .xls"
+            style={{ display: "none" }}
+            ref={receivedStockRef}
+            onChange={handleReceivedStock}
+          />
+          <button
+            className="btn"
+            style={{ background: "#0284c7", color: "#fff" }}
+            onClick={() => receivedStockRef.current.click()}
+            disabled={loading}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Received Stock</span>
           </button>
 
           <button
@@ -1612,8 +1955,27 @@ function AuditScanning() {
     });
   };
 
+  const isAllSelected = products.length > 0 && products.every(p => selectedProducts.has(p.barcode));
+
+  const handleSelectAll = (e) => {
+    e.stopPropagation();
+    if (isAllSelected) {
+      setSelectedProducts(prev => {
+        const newSet = new Set(prev);
+        products.forEach(p => newSet.delete(p.barcode));
+        return newSet;
+      });
+    } else {
+      setSelectedProducts(prev => {
+        const newSet = new Set(prev);
+        products.forEach(p => newSet.add(p.barcode));
+        return newSet;
+      });
+    }
+  };
+
   const completeAudit = () => {
-    navigate("/reconciliation");
+    navigate("/reconciliation", { state: { selectedBarcodes: Array.from(selectedProducts) } });
   };
 
   return (
@@ -1644,7 +2006,7 @@ function AuditScanning() {
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <h3 style={{ margin: 0, color: "#1a1a2e", fontSize: 16 }}>Audit Progress</h3>
-              <button
+              {/* <button
                 onClick={handleRecordSelected}
                 disabled={selectedProducts.size === 0}
                 style={{
@@ -1654,14 +2016,21 @@ function AuditScanning() {
                 }}
               >
                 <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><DownloadIcon size={16} /> Record Selected Scans ({selectedProducts.size})</span>
-              </button>
+              </button> */}
             </div>
 
             <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid #eee", borderRadius: 8 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                 <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
                   <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #ddd", textAlign: "left" }}>
-                    <th style={{ padding: "10px 12px", width: "40px", textAlign: "center" }}>☑️</th>
+                    <th style={{ padding: "10px 12px", width: "40px", textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={isAllSelected}
+                        onChange={handleSelectAll}
+                        style={{ cursor: "pointer", width: 16, height: 16 }}
+                      />
+                    </th>
                     <th style={{ padding: "10px 12px" }}>Product Name</th>
                     <th style={{ padding: "10px 12px" }}>Barcode</th>
                     <th style={{ padding: "10px 12px", textAlign: "center" }}>Expected (Phy)</th>
@@ -1719,7 +2088,9 @@ function AuditScanning() {
             onClick={completeAudit}
             style={{ width: "100%", padding: "12px", borderRadius: 5, background: "#2e7d32", color: "#fff", border: "none", cursor: "pointer", fontWeight: 700, fontSize: 16 }}
           >
-            ✅ Complete Audit & View Report
+            {selectedProducts.size > 0
+              ? `✅ Complete Audit & View Report (${selectedProducts.size} Selected)`
+              : "✅ Complete Audit & View Report"}
           </button>
         </div>
       </div>
@@ -1731,11 +2102,17 @@ function AuditScanning() {
 function ReconciliationReport() {
   const [reportData, setReportData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
+  const selectedBarcodes = location.state?.selectedBarcodes;
 
   useEffect(() => {
     const fetchReport = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/reconciliation/report`);
+        let url = `${API_BASE_URL}/reconciliation/report`;
+        if (selectedBarcodes && selectedBarcodes.length > 0) {
+          url += `?barcodes=${encodeURIComponent(selectedBarcodes.join(","))}`;
+        }
+        const response = await fetch(url);
         const data = await response.json();
         setReportData(data);
         setLoading(false);
@@ -1746,7 +2123,7 @@ function ReconciliationReport() {
     };
 
     fetchReport();
-  }, []);
+  }, [selectedBarcodes]);
 
   if (loading) return <div style={{ padding: 24, textAlign: "center" }}>Loading report...</div>;
   if (!reportData || !reportData.data) return <div style={{ padding: 24, textAlign: "center" }}>No data available</div>;
@@ -1921,22 +2298,95 @@ function ReconciliationReport() {
 
 // --- ACTIVITY LOGS COMPONENT ---
 function ActivityLogs() {
-  const [logs, setLogs] = useState([]);
+  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [expandedSessions, setExpandedSessions] = useState({});
 
   useEffect(() => {
-    fetchLogs();
+    fetchSessions();
   }, []);
 
-  const fetchLogs = async () => {
+  const fetchSessions = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/logs`);
+      const response = await fetch(`${API_BASE_URL}/import-sessions`);
       const data = await response.json();
-      setLogs(data);
+      setSessions(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error("Error fetching logs:", err);
+      console.error("Error fetching import sessions:", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleSession = (sessionId) => {
+    setExpandedSessions(prev => ({ ...prev, [sessionId]: !prev[sessionId] }));
+  };
+
+  const getImportTypeBadge = (importType) => {
+    const styles = {
+      "Sales Import": { bg: "#fee2e2", color: "#991b1b" },
+      "Received Stock Import": { bg: "#dbeafe", color: "#1e40af" },
+      "Product Import": { bg: "#dcfce7", color: "#166534" },
+    };
+    const s = styles[importType] || { bg: "#e0e7ff", color: "#3730a3" };
+    return (
+      <span style={{ padding: "4px 10px", borderRadius: "6px", fontSize: "12px", fontWeight: 700, background: s.bg, color: s.color, whiteSpace: "nowrap" }}>
+        {importType}
+      </span>
+    );
+  };
+
+  const handleExportSession = async (session) => {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("Products Inventory");
+
+      // Header row — match existing inventory template exactly
+      const headerRow = sheet.addRow(["Barcode", "Product Name", "MRP (₹)", "Physical Qty"]);
+      headerRow.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2E7D32" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = {
+          top: { style: "thin" }, bottom: { style: "thin" },
+          left: { style: "thin" }, right: { style: "thin" }
+        };
+      });
+
+      // Data rows
+      session.products.forEach((p) => {
+        const row = sheet.addRow([
+          p.barcode || "",
+          p.productName || "",
+          p.mrp !== undefined ? p.mrp : 0,
+          p.quantity !== undefined ? p.quantity : 0
+        ]);
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: "thin" }, bottom: { style: "thin" },
+            left: { style: "thin" }, right: { style: "thin" }
+          };
+          cell.alignment = { vertical: "middle" };
+        });
+      });
+
+      // Column widths
+      sheet.columns = [
+        { width: 20 }, { width: 28 }, { width: 12 }, { width: 14 }
+      ];
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const dateStr = new Date(session.timestamp).toLocaleDateString("en-GB").replace(/\//g, "-");
+      const typeStr = session.importType.replace(/ /g, "_");
+      a.href = url;
+      a.download = `${typeStr}_${dateStr}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Export failed: " + err.message);
     }
   };
 
@@ -1946,58 +2396,190 @@ function ActivityLogs() {
       <div style={{ padding: "0 32px 32px 32px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
-            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><ClipboardIcon size={28} /> Activity Logs</span></h1>
-            <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Audit trail of all system modifications.</p>
+            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}>
+              <span style={{ display: "flex", alignItems: "center", gap: "10px" }}><ClipboardIcon size={28} /> Activity Logs</span>
+            </h1>
+            <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Import history — expand any row to view product-level details.</p>
           </div>
         </div>
 
-        <div className="card">
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+          {/* Table header */}
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "200px 1fr 140px 160px 48px",
+            gap: 0,
+            background: "#e2e8f0",
+            padding: "12px 20px",
+            fontWeight: 700,
+            fontSize: "13px",
+            color: "#475569",
+            borderBottom: "1px solid #cbd5e1"
+          }}>
+            <span>Time Stamp</span>
+            <span>Import Type</span>
+            <span style={{ textAlign: "center" }}>Total Products</span>
+            <span style={{ textAlign: "center" }}>Action</span>
+            <span></span>
+          </div>
+
           {loading ? (
-            <p>Loading logs...</p>
-          ) : logs.length === 0 ? (
-            <p style={{ color: "#bbb" }}>No activity logs found.</p>
+            <div style={{ padding: 32, textAlign: "center", color: "#94a3b8" }}>Loading import logs...</div>
+          ) : sessions.length === 0 ? (
+            <div style={{ padding: 32, textAlign: "center", color: "#94a3b8" }}>No import sessions found. Import products or sales to see history here.</div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table className="table-modern">
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Action</th>
-                    <th>Product Name</th>
-                    <th>Barcode</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {logs.map((log) => (
-                    <tr key={log._id}>
-                      <td style={{ whiteSpace: "nowrap" }}>
-                        {new Date(log.timestamp).toLocaleString()}
-                      </td>
-                      <td>
-                        <span style={{
-                          padding: "4px 8px",
-                          borderRadius: "4px",
-                          fontSize: "12px",
-                          fontWeight: 600,
-                          background: log.action.includes("CREATE") || log.action.includes("IMPORT") ? "#dcfce7" :
-                            log.action.includes("DELETE") || log.action.includes("SALES") ? "#fee2e2" : "#e0e7ff",
-                          color: log.action.includes("CREATE") || log.action.includes("IMPORT") ? "#166534" :
-                            log.action.includes("DELETE") || log.action.includes("SALES") ? "#991b1b" : "#3730a3"
-                        }}>
-                          {log.action}
-                        </span>
-                      </td>
-                      <td style={{ fontWeight: 600 }}>{log.productName}</td>
-                      <td style={{ fontFamily: "monospace" }}>{log.barcode}</td>
-                      <td style={{ color: "#64748b", fontSize: "13px" }}>{log.details}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            sessions.map((session, idx) => {
+              const isExpanded = !!expandedSessions[session.importSessionId];
+              return (
+                <div key={session.importSessionId} style={{ borderBottom: idx < sessions.length - 1 ? "1px solid #e2e8f0" : "none" }}>
+                  {/* Session row */}
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: "200px 1fr 140px 160px 48px",
+                    gap: 0,
+                    padding: "14px 20px",
+                    alignItems: "center",
+                    background: isExpanded ? "#f1f5f9" : "#fff",
+                    cursor: "pointer",
+                    transition: "background 0.15s"
+                  }}
+                    onClick={() => toggleSession(session.importSessionId)}
+                  >
+                    <span style={{ fontSize: "13px", color: "#475569", whiteSpace: "nowrap" }}>
+                      {new Date(session.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).replace(",", "")}
+                    </span>
+                    <span>{getImportTypeBadge(session.importType)}</span>
+                    <span style={{ textAlign: "center", fontWeight: 700, color: "#0f172a", fontSize: "15px" }}>
+                      {session.products.length}
+                    </span>
+                    <span style={{ textAlign: "center" }}>
+                      <button
+                        className="btn"
+                        style={{ background: "#16a34a", color: "#fff", padding: "6px 14px", fontSize: "12px", fontWeight: 600, borderRadius: "6px" }}
+                        onClick={(e) => { e.stopPropagation(); handleExportSession(session); }}
+                      >
+                        <span style={{ display: "flex", alignItems: "center", gap: "5px" }}><DownloadIcon size={13} /> Export Excel</span>
+                      </button>
+                    </span>
+                    <span style={{ textAlign: "center", color: "#64748b", fontSize: "18px", userSelect: "none" }}>
+                      {isExpanded ? "▲" : "▼"}
+                    </span>
+                  </div>
+
+                  {/* Expanded product detail table */}
+                  {isExpanded && (
+                    <div style={{ background: "#f8fafc", borderTop: "1px solid #e2e8f0", padding: "0 0 12px 0" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                        <thead>
+                          <tr style={{ background: "#e0f2fe" }}>
+                            <th style={{ padding: "10px 20px", textAlign: "left", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>Time Stamp</th>
+                            <th style={{ padding: "10px 12px", textAlign: "left", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>Product Name</th>
+                            <th style={{ padding: "10px 12px", textAlign: "left", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>Barcode</th>
+                            <th style={{ padding: "10px 12px", textAlign: "center", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>MRP (₹)</th>
+                            <th style={{ padding: "10px 12px", textAlign: "center", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>Quantity</th>
+                            <th style={{ padding: "10px 12px", textAlign: "left", fontWeight: 700, color: "#0369a1", borderBottom: "1px solid #bae6fd" }}>Type</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {session.products.map((p, pIdx) => (
+                            <tr key={pIdx} style={{ background: pIdx % 2 === 0 ? "#fff" : "#f1f5f9" }}>
+                              <td style={{ padding: "9px 20px", whiteSpace: "nowrap", color: "#64748b" }}>
+                                {new Date(p.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).replace(",", "")}
+                              </td>
+                              <td style={{ padding: "9px 12px", fontWeight: 600, color: "#0f172a" }}>{p.productName}</td>
+                              <td style={{ padding: "9px 12px", fontFamily: "monospace", color: "#475569" }}>{p.barcode}</td>
+                              <td style={{ padding: "9px 12px", textAlign: "center", color: "#0f172a" }}>₹{(p.mrp || 0).toFixed(2)}</td>
+                              <td style={{ padding: "9px 12px", textAlign: "center", fontWeight: 600, color: "#0f172a" }}>{p.quantity || 0}</td>
+                              <td style={{ padding: "9px 12px" }}>
+                                <span style={{
+                                  padding: "2px 8px", borderRadius: "4px", fontSize: "11px", fontWeight: 600,
+                                  background: p.action && p.action.includes("CREATE") ? "#dcfce7" : "#e0e7ff",
+                                  color: p.action && p.action.includes("CREATE") ? "#166534" : "#3730a3"
+                                }}>
+                                  {p.action || "—"}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// --- LICENSE WRAPPER ---
+function LicenseWrapper({ children }) {
+  const [licenseStatus, setLicenseStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [keyInput, setKeyInput] = useState("");
+  const [activating, setActivating] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    checkLicense();
+  }, []);
+
+  const checkLicense = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/license/status`);
+      const data = await res.json();
+      setLicenseStatus(data.valid);
+      if (!data.valid && data.message) setErrorMsg(data.message);
+    } catch (err) {
+      setLicenseStatus(false);
+      setErrorMsg("Cannot connect to server to verify license.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleActivate = async (e) => {
+    e.preventDefault();
+    setActivating(true);
+    setErrorMsg("");
+    try {
+      const res = await fetch(`${API_BASE_URL}/license/activate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: keyInput })
+      });
+      const data = await res.json();
+      if (data.valid) {
+        setLicenseStatus(true);
+      } else {
+        setErrorMsg(data.message);
+      }
+    } catch (err) {
+      setErrorMsg("Activation failed. Please try again.");
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  if (loading) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', fontFamily: 'Outfit, sans-serif' }}>Verifying License...</div>;
+
+  if (licenseStatus === true) return children;
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f1f5f9', fontFamily: 'Outfit, sans-serif' }}>
+      <div style={{ background: '#fff', padding: '40px', borderRadius: '12px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', maxWidth: '400px', width: '100%', textAlign: 'center' }}>
+        <h2 style={{ marginTop: 0, color: '#1e293b' }}>Activate Software</h2>
+        <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '24px' }}>Please enter your license key to continue.</p>
+        {errorMsg && <div style={{ background: '#fee2e2', color: '#b91c1c', padding: '10px', borderRadius: '6px', marginBottom: '16px', fontSize: '14px' }}>{errorMsg}</div>}
+        <form onSubmit={handleActivate}>
+          <input type="text" placeholder="XXXX-XXXX-XXXX-XXXX" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} required style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '16px', fontSize: '16px', boxSizing: 'border-box', fontFamily: 'monospace' }} />
+          <button type="submit" disabled={activating} style={{ width: '100%', padding: '12px', background: '#2e7d32', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: activating ? 'not-allowed' : 'pointer', fontSize: '16px' }}>
+            {activating ? 'Verifying...' : 'Activate License'}
+          </button>
+        </form>
       </div>
     </div>
   );
@@ -2014,26 +2596,28 @@ function App() {
 
   if (!isAuthenticated) {
     return (
-      <>
+      <LicenseWrapper>
         <style>{globalStyles}</style>
         <Login onLogin={handleLogin} />
-      </>
+      </LicenseWrapper>
     );
   }
 
   return (
-    <Router>
-      <style>{globalStyles}</style>
-      <Routes>
-        <Route path="/" element={<RackHistory />} />
-        <Route path="/audit-history" element={<AuditHistory />} />
-        <Route path="/audit-details" element={<AuditDetails />} />
-        <Route path="/products" element={<ProductManagement />} />
-        <Route path="/audit" element={<AuditScanning />} />
-        <Route path="/reconciliation" element={<ReconciliationReport />} />
-        <Route path="/logs" element={<ActivityLogs />} />
-      </Routes>
-    </Router>
+    <LicenseWrapper>
+      <Router>
+        <style>{globalStyles}</style>
+        <Routes>
+          <Route path="/" element={<RackHistory />} />
+          <Route path="/audit-history" element={<AuditHistory />} />
+          <Route path="/audit-details" element={<AuditDetails />} />
+          <Route path="/products" element={<ProductManagement />} />
+          <Route path="/audit" element={<AuditScanning />} />
+          <Route path="/reconciliation" element={<ReconciliationReport />} />
+          <Route path="/logs" element={<ActivityLogs />} />
+        </Routes>
+      </Router>
+    </LicenseWrapper>
   );
 }
 

@@ -1,0 +1,4 @@
+owner: harikevells
+repo: barcode_system
+provider: github
+updaterCacheDirName: electron-app-updater

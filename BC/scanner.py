@@ -13,7 +13,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-WEB_API_URL ="http://192.168.0.129:5001/api/barcode"
+WEB_API_URL ="http://192.168.0.114:5001/api/barcode"
 
 
 # ---------------- SCANNER WORKER ----------------
@@ -65,11 +65,10 @@ class ScannerWorker(threading.Thread):
             logger.error(f"[Scanner {self.scanner_id}] Error: {e}")
 
     def process_barcode(self, barcode):
-        # add scanner-specific prefix for scanner 1 and 2
-        if self.scanner_id == 1:
-            barcode = f"a{barcode}"
-        elif self.scanner_id == 2:
-            barcode = f"b{barcode}"
+        # add scanner-specific prefix dynamically (1->a, 2->b, 3->c, 4->d, etc.)
+        if 1 <= self.scanner_id <= 26:
+            prefix = chr(ord('a') + self.scanner_id - 1)
+            barcode = f"{prefix}{barcode}"
 
         # 1. TERMINAL OUTPUT
         print(f"🟢 Scanner {self.scanner_id} -> {barcode}")
@@ -113,13 +112,32 @@ class ScannerManager:
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
         scanner_devices = []
+        seen_phys = set()
 
         for d in devices:
             name = d.name.lower()
+            logger.info(f"Inspecting device: {d.path} | Name: {d.name} | Phys: {d.phys}")
 
-            # filter barcode scanners
-            if "hid" in name or "scanner" in name or "kbw" in name:
-                scanner_devices.append(d)
+            # Ignore non-scanner system events
+            if any(ignore in name for ignore in ["power button", "video bus", "sleep button", "control button"]):
+                continue
+
+            caps = d.capabilities()
+            if evdev.ecodes.EV_KEY not in caps:
+                continue
+
+            keys = caps[evdev.ecodes.EV_KEY]
+            # Barcode HID scanners send standard keyboard keycodes (must have KEY_ENTER and KEY_1)
+            if evdev.ecodes.KEY_ENTER not in keys or evdev.ecodes.KEY_1 not in keys:
+                continue
+
+            # Deduplicate multiple interfaces from the same physical USB device
+            phys_base = d.phys.rsplit('/', 1)[0] if d.phys else d.path
+            if phys_base in seen_phys:
+                continue
+            seen_phys.add(phys_base)
+
+            scanner_devices.append(d)
 
         return scanner_devices
 
@@ -129,6 +147,16 @@ class ScannerManager:
         devices = self.detect_scanners()
 
         logger.info(f"Detected scanners: {len(devices)}")
+
+        # Notify Web API server of detected active scanner count
+        try:
+            requests.post(
+                WEB_API_URL.replace("/api/barcode", "/api/scanners/count"),
+                json={"count": len(devices)},
+                timeout=2
+            )
+        except Exception as e:
+            logger.error(f"Failed to send active scanner count: {e}")
 
         for i, device in enumerate(devices):
 

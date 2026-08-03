@@ -7,7 +7,46 @@
     "start": "concurrently \"npm run server\" \"npm run client\" \"npm run electron\"",
     "server": "node server/serialServer.js",
     "client": "cd client && npm start",
-    "electron": "cd electron && electron ."
+    "electron": "cd electron && electron .",
+    "build:client": "cd client && npm run build",
+    "build:icons": "electron-icon-builder --input=./electron/icon.png --output=./electron/icons",
+    "build:win": "npm run build:client && electron-builder --win --x64",
+    "build:mac": "npm run build:client && electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.kevells.multiscannerapp",
+    "productName": "MultiScannerApp",
+    "directories": {
+      "output": "dist",
+      "app": "electron"
+    },
+    "files": [
+      "**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "client/build",
+        "to": "client/build",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": "zip",
+      "icon": "electron/icons/icons/mac/icon.icns"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "electron/icons/icons/win/icon.ico"
+    }
   },
   "dependencies": {
     "@serialport/parser-readline": "^12.0.0",
@@ -20,5 +59,9 @@
     "serialport": "^12.0.0",
     "sqlite3": "^6.0.1",
     "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.15.2",
+    "electron-icon-builder": "^2.0.1"
   }
 }
