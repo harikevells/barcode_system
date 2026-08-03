@@ -488,7 +488,7 @@ function Dashboard() {
     };
 
     const connectWS = () => {
-      const ws = new WebSocket("ws://127.0.0.1:8080");
+      const ws = new WebSocket("ws://16.16.123.89:8080");
       wsRef.current = ws;
       ws.onopen = () => setWsStatus("Connected");
       ws.onmessage = (event) => {
