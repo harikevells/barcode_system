@@ -741,7 +741,7 @@ function RackHistory() {
   }, [activeSession]);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://127.0.0.1:8080");
+    const ws = new WebSocket("ws://16.16.123.89:8080");
     ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -1899,7 +1899,7 @@ function AuditScanning() {
 
   useEffect(() => {
     if (compareAuditId) return; // Do not connect WS if we are just comparing an old session
-    const ws = new WebSocket("ws://127.0.0.1:8080");
+    const ws = new WebSocket("ws://16.16.123.89:8080");
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);

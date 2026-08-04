@@ -13,7 +13,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-WEB_API_URL ="http://192.168.0.114:5001/api/barcode"
+WEB_API_URL ="http://16.16.123.89/api/barcode"
 
 
 # ---------------- SCANNER WORKER ----------------
