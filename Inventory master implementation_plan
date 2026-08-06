@@ -1,0 +1,115 @@
+
+# Implementation Plan: Systemd Auto-Restart Service and Flow Analysis
+
+Establish an auto-restarting `systemd` service for the Raspberry Pi barcode scanner script `BC/main.py` and document/verify the network flow and ports between the Frontend (React/Electron), Backend (Express/WebSocket), and Scanner Client (Python).
+
+## Proposed Changes
+
+We will create a service template file `BC/scanner.service` in the repository so it can be deployed directly to the Raspberry Pi.
+
+### Scanner Service Component
+
+#### [NEW] [scanner.service](file:///d:/barcode_system/BC/scanner.service)
+Create a `systemd` service file configuration that:
+- Runs `main.py` under the `pi` user context.
+- Configures auto-restart behavior with a 5-second delay.
+- Restarts on failure or unexpected shutdowns.
+- Logs stdout/stderr output directly to systemd logs.
+
+---
+
+## Detailed Port & Flow Analysis
+
+The system contains three major components interacting over the network:
+
+```mermaid
+graph TD
+    subgraph Windows PC [Windows Host / Server]
+        ReactUI[React Frontend / Electron<br>Port: 3000 / Static]
+        ExpressSrv[Express Backend API<br>Port: 5001]
+        WebSocketSrv[WebSocket Server<br>Port: 8080]
+    end
+    
+    subgraph RaspberryPi [Raspberry Pi <br> IP: 192.168.0.110]
+        ScannerPy[Python Client BC/main.py<br>Port: 8000]
+        SQLiteDB[SQLite: barcode_scans.db]
+        Scanners[Physical HID Scanners]
+    end
+
+    %% Scans Flow
+    Scanners -->|evdev keypress events| ScannerPy
+    ScannerPy -->|Local SQLite Write| SQLiteDB
+    ScannerPy -->|HTTP POST /api/barcode<br>IP: 192.168.0.141:5001| ExpressSrv
+    
+    %% Backend to Client Broadcast
+    ExpressSrv -->|Local ws broadcast| WebSocketSrv
+    WebSocketSrv -->|WebSockets update| ReactUI
+    ReactUI -->|REST requests| ExpressSrv
+```
+
+### 1. Ports and Communication Matrix
+
+| Source Component | Destination Component | Protocol / Port | Purpose | Target URL |
+| :--- | :--- | :--- | :--- | :--- |
+| **Physical Scanners** | **Python (Pi)** | USB HID (evdev) | Read scanner inputs as keycodes | `/dev/input/event*` |
+| **Python (Pi)** | **Express Backend** | HTTP POST / `5001` | Transmit barcode scans in real-time | `http://192.168.0.141:5001/api/barcode` |
+| **Python (Pi)** | **Internal loop** | Flask Thread / `8000` | Local API server for scans and health | `http://127.0.0.1:8000` |
+| **React/Electron** | **Express Backend** | HTTP REST / `5001` | Admin login, database reconciliation, sync, settings | `http://localhost:5001/api` |
+| **React/Electron** | **WebSocket Server** | WebSockets / `8080` | Listen for live barcode scan broadcasts | `ws://127.0.0.1:8080` |
+
+### 2. Full Flow Analysis of a Scan Event
+1. **Physical Scan**: A barcode scanner connected to the Raspberry Pi scans a barcode and acts as a USB keyboard.
+2. **evdev Capture**: The Python script `scanner.py` running inside `main.py` detects keypresses via the `evdev` library, processes them, and prints them to the terminal.
+3. **Database Insertion**: The scan is saved locally on the Raspberry Pi inside `/home/pi/BC/barcode_scans.db` (using the SQLite database manager).
+4. **Network Transmission**: The Python client sends an HTTP POST request to the Node backend server running at `http://192.168.0.141:5001/api/barcode`.
+5. **Deduplication & DB Save**: The Express server checks if the barcode is a duplicate within 200ms. If valid, it:
+   - Stores the scan in MongoDB (`BCScan` collection).
+   - Broadcasts the live scan update over WebSockets.
+6. **Real-time UI Update**: The React app connected to `ws://127.0.0.1:8080` receives the scan payload and displays the scanned item instantly on the live dashboard.
+
+---
+
+## Deployment Instructions
+
+To install this systemd service on your Raspberry Pi:
+
+1. **Copy the service file**:
+   Copy `scanner.service` to `/etc/systemd/system/scanner.service` on the Pi:
+   ```bash
+   sudo cp /home/pi/BC/scanner.service /etc/systemd/system/scanner.service
+   ```
+2. **Reload systemd daemon**:
+   ```bash
+   sudo systemctl daemon-reload
+   ```
+3. **Enable the service to run on boot**:
+   ```bash
+   sudo systemctl enable scanner.service
+   ```
+4. **Start the service**:
+   ```bash
+   sudo systemctl start scanner.service
+   ```
+5. **Check the status / logs**:
+   ```bash
+   sudo systemctl status scanner.service
+   # View logs in real-time:
+   journalctl -u scanner.service -f
+   ```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- Once the service is started, we can inspect its status via `systemctl status scanner.service`.
+- We can simulate a crash by killing the Python process on the Pi and verifying that systemd immediately restarts it:
+  ```bash
+  sudo pkill -f main.py
+  # Check if a new PID is assigned automatically
+  systemctl status scanner.service
+  ```
+
+### Manual Verification
+- Verify that scans from the physical scanners on the Pi update the local SQLite database.
+- Verify that scans reach the backend server (`http://192.168.0.141:5001/api/barcode`) and are broadcasted to the UI via WebSockets on port `8080`.

@@ -1,0 +1,16 @@
+[Unit]
+Description=Multi Barcode Scanner System Service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/BC
+ExecStart=/usr/bin/python3 /home/pi/BC/main.py
+Restart=always
+RestartSec=5
+StandardOutput=inherit
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

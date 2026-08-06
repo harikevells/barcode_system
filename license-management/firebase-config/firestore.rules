@@ -1,0 +1,30 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Super Admin function to check if the current user is authenticated
+    function isSuperAdmin() {
+      return request.auth != null;
+    }
+
+    match /licenses/{licenseId} {
+      // Super Admin can do everything
+      allow read, write: if isSuperAdmin();
+
+      // Client app (unauthenticated or anonymously authenticated)
+      // Can read specific license to validate it
+      allow read: if true; 
+
+      // Client app can only update 'machineId' (if empty) and 'lastVerifiedAt'
+      // Cannot modify 'licenseKey', 'active', 'expiryDate', 'customerName', etc.
+      allow update: if true 
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['machineId', 'lastVerifiedAt'])
+        && (
+            // Either machineId is unchanged (just updating lastVerifiedAt)
+            request.resource.data.machineId == resource.data.machineId
+            // OR machineId was empty and is now being set
+            || (resource.data.machineId == "" && request.resource.data.machineId != "")
+        );
+    }
+  }
+}

@@ -1,0 +1,10 @@
+flask
+flask-cors
+hidapi
+evdev
+pandas
+numpy
+requests
+schedule
+psutil
+Werkzeug

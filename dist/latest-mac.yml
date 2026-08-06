@@ -1,0 +1,8 @@
+version: 1.0.0
+files:
+  - url: MultiScannerApp-1.0.0-arm64-mac.zip
+    sha512: XvoEdsemOfoQ/i0f7rndIcWWtGUw3pvs4Eth7ItFpbypi5d0v0Hmd+hKAFXe8/Qon2tpjN2GnnZUmN6YOxhPvQ==
+    size: 217066029
+path: MultiScannerApp-1.0.0-arm64-mac.zip
+sha512: XvoEdsemOfoQ/i0f7rndIcWWtGUw3pvs4Eth7ItFpbypi5d0v0Hmd+hKAFXe8/Qon2tpjN2GnnZUmN6YOxhPvQ==
+releaseDate: '2026-06-12T05:05:07.309Z'

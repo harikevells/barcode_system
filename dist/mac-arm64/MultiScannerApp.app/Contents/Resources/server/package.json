@@ -1,0 +1,21 @@
+{
+  "name": "barcode-serial-server",
+  "version": "1.0.0",
+  "main": "serialServer.js",
+  "scripts": {
+    "start": "node serialServer.js",
+    "dev": "node serialServer.js"
+  },
+  "dependencies": {
+    "@serialport/parser-readline": "^12.0.0",
+    "cors": "^2.8.6",
+    "crypto-js": "^4.2.0",
+    "express": "^5.2.1",
+    "firebase": "^12.14.0",
+    "mongoose": "^9.5.0",
+    "node-machine-id": "^1.1.12",
+    "serialport": "^12.0.0",
+    "sqlite3": "^6.0.1",
+    "ws": "^8.0.0"
+  }
+}

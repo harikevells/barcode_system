@@ -1,0 +1,1401 @@
+const path = require("path");
+const sqlite3 = require("sqlite3").verbose();
+const { SerialPort } = require("serialport");
+const { ReadlineParser } = require("@serialport/parser-readline");
+const { WebSocketServer } = require("ws");
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+
+const WSS_PORT = 8080;
+const API_PORT = 5001;
+
+// Simple memory cache for backend de-duplication (prevents MongoDB flooding)
+const recentScans = new Map();
+function isDuplicateScan(barcode) {
+  const now = Date.now();
+  const lastScan = recentScans.get(barcode);
+  if (lastScan && (now - lastScan) < 200) {
+    return true; // Ignore only within 200ms (hardware bounce protection)
+  }
+  recentScans.set(barcode, now);
+
+  // Cleanup old entries to prevent memory leak
+  if (recentScans.size > 1000) {
+    const cutoff = now - 5000;
+    for (const [key, timestamp] of recentScans.entries()) {
+      if (timestamp < cutoff) recentScans.delete(key);
+    }
+  }
+  return false;
+}
+
+// --- MongoDB Setup ---
+mongoose.connect("mongodb://127.0.0.1:27017/barcodeDB")
+  .then(() => console.log("📦 Connected to MongoDB"))
+  .catch(err => console.error("❌ MongoDB connection error:", err));
+
+const shelfSchema = new mongoose.Schema({
+  shelfCode: String,
+  createdAt: { type: Date, default: Date.now },
+  products: [
+    {
+      barcode: String,
+      type: { type: String, enum: ["scan", "manual"] },
+      timestamp: { type: Date, default: Date.now }
+    }
+  ]
+});
+
+const Shelf = mongoose.model("Shelf", shelfSchema);
+
+const bcScanSchema = new mongoose.Schema({
+  rowId: { type: Number, unique: true, index: true },
+  scannerId: Number,
+  barcode: String,
+  timestamp: Date,
+  syncedAt: { type: Date, default: Date.now },
+  source: { type: String, default: "BC" }
+}, { timestamps: true });
+
+const BCScan = mongoose.model("BCScan", bcScanSchema);
+
+// --- Product Master Schema ---
+const productSchema = new mongoose.Schema({
+  barcode: { type: String, required: true, unique: true, index: true },
+  productName: String,
+  mrp: { type: Number, default: 0 },
+  physicalQuantity: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const Product = mongoose.model("Product", productSchema);
+
+// --- Activity Log Schema ---
+const activityLogSchema = new mongoose.Schema({
+  timestamp: { type: Date, default: Date.now },
+  action: { type: String, required: true },
+  productName: { type: String, default: "N/A" },
+  barcode: { type: String, default: "" },
+  previousValue: { type: String, default: "N/A" },
+  updatedValue: { type: String, default: "N/A" },
+  details: { type: String, default: "" },
+  actionType: { type: String, required: true },
+  importSessionId: { type: String, default: "" },  // groups all logs for a single import run
+  mrp: { type: Number, default: 0 },
+  quantity: { type: Number, default: 0 }
+});
+
+const ActivityLog = mongoose.model("ActivityLog", activityLogSchema);
+
+// Helper function to log actions
+async function logActivity(action, productName, previousValue, updatedValue, actionType, barcode = "", details = "", importSessionId = "", mrp = 0, quantity = 0) {
+  try {
+    const log = new ActivityLog({
+      action,
+      productName: productName || "N/A",
+      barcode: barcode || "",
+      previousValue: previousValue !== undefined && previousValue !== null ? String(previousValue) : "N/A",
+      updatedValue: updatedValue !== undefined && updatedValue !== null ? String(updatedValue) : "N/A",
+      details: details || (previousValue !== undefined && previousValue !== null && updatedValue !== undefined && updatedValue !== null ? `Qty: ${previousValue} → ${updatedValue}` : ""),
+      actionType,
+      importSessionId,
+      mrp,
+      quantity
+    });
+    await log.save();
+  } catch (err) {
+    console.error("❌ Failed to log activity:", err);
+  }
+}
+
+
+// --- Express Setup ---
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Global Cache-Control Prevention Middleware
+app.use((req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  next();
+});
+
+const { checkCurrentLicenseStatus, validateLicenseOnline, clearMemoryCache } = require("./licenseHelper");
+
+// License Endpoints
+app.get("/api/license/status", async (req, res) => {
+  const status = await checkCurrentLicenseStatus();
+  res.json(status);
+});
+
+app.post("/api/license/activate", async (req, res) => {
+  const { key } = req.body;
+  if (!key) return res.status(400).json({ valid: false, message: "Key required" });
+  clearMemoryCache(); // Force a fresh Firebase check on next request after activation
+  const status = await validateLicenseOnline(key);
+  res.json(status);
+});
+
+// Global License Guard Middleware
+app.use(async (req, res, next) => {
+  if (req.method === 'OPTIONS' || req.path.startsWith('/api/license')) {
+    return next();
+  }
+
+  if (req.path.startsWith('/api/')) {
+    const status = await checkCurrentLicenseStatus();
+    if (!status.valid) {
+      return res.status(403).json({ error: "LICENSE_REQUIRED", message: status.message });
+    }
+  }
+  next();
+});
+
+// Add scanned product
+app.post("/api/scan", async (req, res) => {
+  const { barcode } = req.body;
+
+  try {
+    const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+    if (!activeSession) {
+      console.log(`⏩ Scan ignored (no active audit session): "${barcode}"`);
+      return res.status(400).json({ error: "NO_ACTIVE_AUDIT", message: "No active audit session. Scan ignored." });
+    }
+  } catch (err) {
+    console.error("Error checking active audit session:", err);
+    return res.status(500).json({ error: "Database error checking audit status" });
+  }
+
+  if (isDuplicateScan(barcode)) {
+    return res.status(200).json({ message: "Ignored duplicate scan" });
+  }
+
+  try {
+    // Store scan in BCScan collection
+    const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "web"
+    });
+    await bcScan.save();
+
+    // Broadcast to Live Dashboard
+    broadcast({
+      source: "serial",
+      port: "Web/API",
+      value: barcode,
+      timestamp: Date.now()
+    });
+
+    res.json({ message: "Product added", product: bcScan });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+let activeScannersCount = 2;
+
+app.get("/api/scanners/count", (req, res) => {
+  res.json({ count: activeScannersCount });
+});
+
+app.post("/api/scanners/count", (req, res) => {
+  const { count } = req.body;
+  if (count && !isNaN(count)) {
+    activeScannersCount = parseInt(count);
+    console.log(`📡 Updated Active Scanners Count: ${activeScannersCount}`);
+    broadcast({
+      source: "system",
+      activeScannersCount: activeScannersCount
+    });
+  }
+  res.json({ success: true, count: activeScannersCount });
+});
+
+// Endpoint for Python Raspberry Pi script
+app.post("/api/barcode", async (req, res) => {
+  // Python script might send {"barcode": "...", "scanner": "..."}
+  const barcode = req.body.barcode || req.body.data || Object.keys(req.body)[0];
+  const scannerId = req.body.scanner || req.body.scannerId || req.body.scanner_id || "1";
+
+  console.log(`📥 /api/barcode received: barcode="${barcode}" scanner="${scannerId}" from ${req.ip}`);
+
+  try {
+    const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+    if (!activeSession) {
+      console.log(`⏩ Scan ignored (no active audit session): "${barcode}"`);
+      return res.status(400).json({ error: "NO_ACTIVE_AUDIT", message: "No active audit session. Scan ignored." });
+    }
+  } catch (err) {
+    console.error("Error checking active audit session:", err);
+    return res.status(500).json({ error: "Database error checking audit status" });
+  }
+
+  if (!isNaN(scannerId)) {
+    const sNum = parseInt(scannerId);
+    if (sNum > activeScannersCount) {
+      activeScannersCount = sNum;
+      broadcast({ source: "system", activeScannersCount });
+    }
+  }
+
+  if (isDuplicateScan(barcode)) {
+    console.log(`⏩ Duplicate scan ignored: "${barcode}"`);
+    return res.status(200).json({ message: "Ignored duplicate scan" });
+  }
+
+  try {
+    // 1. Save to MongoDB so it shows up in Rack History!
+    const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
+      scannerId: isNaN(scannerId) ? null : parseInt(scannerId),
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "API"
+    });
+    await bcScan.save();
+
+    // 2. Broadcast directly to React WebSocket so the UI updates LIVE!
+    broadcast({
+      source: "serial",
+      port: `RaspberryPi (Scanner ${scannerId})`,
+      value: barcode,
+      timestamp: Date.now()
+    });
+
+    console.log(`✅ Broadcasted: "${barcode}" to ${clients.size} WebSocket client(s)`);
+    res.json({ success: true, message: "Saved and Broadcasted" });
+  } catch (err) {
+    console.error("Error in /api/barcode:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add manual product
+app.post("/api/manual", async (req, res) => {
+  const { barcode } = req.body;
+
+  try {
+    // Store manual entry in BCScan collection
+    const bcScan = new BCScan({
+      rowId: Date.now() + Math.floor(Math.random() * 1000),
+      barcode: barcode,
+      timestamp: new Date(),
+      source: "manual"
+    });
+    await bcScan.save();
+    res.json({ message: "Manual product added", product: bcScan });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function readBCScans() {
+  const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
+
+  return new Promise((resolve, reject) => {
+    try {
+      const db = new sqlite3.Database(dbPath, (err) => {
+        if (err) {
+          console.error("❌ SQLite connection error:", err);
+          return reject(err);
+        }
+
+        db.serialize(() => {
+          db.all("SELECT id, scanner_id, barcode, timestamp FROM scans ORDER BY id ASC", (err, rows) => {
+            db.close((closeErr) => {
+              if (err) {
+                console.error("❌ Query error:", err);
+                return reject(err);
+              }
+              if (closeErr) {
+                console.error("❌ Close error:", closeErr);
+                return reject(closeErr);
+              }
+              console.log(`✅ Read ${rows?.length || 0} scans from BC database`);
+              resolve(rows || []);
+            });
+          });
+        });
+      });
+    } catch (err) {
+      console.error("❌ Unexpected error in readBCScans:", err);
+      reject(err);
+    }
+  });
+}
+
+app.post("/api/sync-bc-db", async (req, res) => {
+  try {
+    console.log("📤 Starting BC database sync...");
+    const rows = await readBCScans();
+
+    let synced = 0;
+    for (const row of rows) {
+      try {
+        await BCScan.updateOne(
+          { rowId: row.id },
+          {
+            $set: {
+              scannerId: row.scanner_id,
+              barcode: row.barcode,
+              timestamp: row.timestamp ? new Date(row.timestamp) : new Date(),
+              syncedAt: new Date(),
+              source: "BC"
+            }
+          },
+          { upsert: true }
+        );
+        synced += 1;
+      } catch (updateErr) {
+        console.error(`❌ Failed to sync row ${row.id}:`, updateErr);
+      }
+    }
+
+    console.log(`✅ Synced ${synced} records to MongoDB`);
+    res.json({ message: `BC database synced to MongoDB (${synced} records)`, count: synced });
+  } catch (err) {
+    console.error("❌ BC sync failed:", err);
+    res.status(500).json({ error: err.message || "Failed to sync BC database" });
+  }
+});
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const history = await BCScan.find().sort({ timestamp: -1, createdAt: -1 });
+    res.json(history);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch all data
+app.get("/api/shelves", async (req, res) => {
+  try {
+    const shelves = await Shelf.find().sort({ createdAt: -1 });
+    res.json(shelves);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear DB or Session
+app.delete("/api/clear", async (req, res) => {
+  try {
+    // 1. Clear MongoDB Collections
+    await Shelf.deleteMany({});
+    await BCScan.deleteMany({});
+
+    // 2. Clear Local SQLite Database (if it exists on this machine)
+    const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
+    const db = new sqlite3.Database(dbPath, (err) => {
+      if (!err) {
+        db.run("DELETE FROM scans", (deleteErr) => {
+          if (deleteErr) console.error("❌ Failed to clear SQLite DB:", deleteErr);
+          else console.log("🗑️ SQLite DB Cleared");
+          db.close();
+        });
+      }
+    });
+
+    res.json({ message: "All databases (MongoDB & SQLite) cleared completely" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear ALL Databases (including Products, ActivityLogs, AuditSessions)
+app.delete("/api/clear-all", async (req, res) => {
+  try {
+    // 1. Clear MongoDB Collections
+    await Shelf.deleteMany({});
+    await BCScan.deleteMany({});
+    await Product.deleteMany({});
+    await ActivityLog.deleteMany({});
+    await AuditSession.deleteMany({});
+
+    // 2. Clear Local SQLite Database (if it exists on this machine)
+    const dbPath = path.join(__dirname, "..", "BC", "barcode_scans.db");
+    const db = new sqlite3.Database(dbPath, (err) => {
+      if (!err) {
+        db.run("DELETE FROM scans", (deleteErr) => {
+          if (deleteErr) console.error("❌ Failed to clear SQLite DB:", deleteErr);
+          else console.log("🗑️ SQLite DB Cleared");
+          db.close();
+        });
+      }
+    });
+
+    res.json({ message: "All databases (MongoDB & SQLite) cleared completely, including Products and Logs" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== INVENTORY RECONCILIATION ENDPOINTS ==========
+
+// Create or update a product
+app.post("/api/products", async (req, res) => {
+  try {
+    const { barcode, productName, mrp, physicalQuantity } = req.body;
+    const cleanBarcode = barcode ? String(barcode).trim() : "";
+    const cleanName = productName ? String(productName).trim() : "";
+
+    // Search by barcode first (case-insensitive), fallback to product name (case-insensitive)
+    let product = null;
+    if (cleanBarcode) {
+      product = await Product.findOne({ barcode: new RegExp("^" + cleanBarcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+    }
+    if (!product && cleanName) {
+      product = await Product.findOne({ productName: new RegExp("^" + cleanName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+    }
+
+    const isNew = !product;
+    const previousQty = product ? product.physicalQuantity : 0;
+
+    if (product) {
+      // Update existing product
+      product.productName = productName;
+      if (cleanBarcode) product.barcode = cleanBarcode;
+      product.mrp = mrp;
+      product.physicalQuantity = physicalQuantity;
+      product.updatedAt = new Date();
+      await product.save();
+    } else {
+      // Create new product
+      product = new Product({
+        barcode: cleanBarcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase(),
+        productName,
+        mrp,
+        physicalQuantity
+      });
+      await product.save();
+    }
+
+    // Log the manual update/creation
+    const action = isNew ? "PRODUCT_CREATE" : "PRODUCT_UPDATE";
+    const sessionId = "MANUAL_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    await logActivity(
+      action,
+      productName,
+      previousQty,
+      physicalQuantity,
+      isNew ? "Manual Create" : "Manual Update",
+      product.barcode,
+      isNew ? `Created manually with Qty: ${physicalQuantity}` : `Updated manually: Qty ${previousQty} → ${physicalQuantity}`,
+      sessionId,
+      mrp,
+      physicalQuantity
+    );
+
+    res.json({ message: "Product saved", product });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all products
+app.get("/api/products", async (req, res) => {
+  try {
+    const products = await Product.find().sort({ createdAt: -1 });
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single product by barcode
+app.get("/api/products/:barcode", async (req, res) => {
+  try {
+    const product = await Product.findOne({ barcode: req.params.barcode });
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    res.json(product);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete product
+app.delete("/api/products/:id", async (req, res) => {
+  try {
+    // Find product before deleting to log details
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    await Product.findByIdAndDelete(req.params.id);
+
+    // Log the deletion
+    await logActivity("PRODUCT_DELETE", product.productName, product.physicalQuantity, "Deleted", "Deletion", product.barcode);
+
+    res.json({ message: "Product deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all activity logs
+app.get("/api/logs", async (req, res) => {
+  try {
+    const logs = await ActivityLog.find().sort({ timestamp: -1 });
+    res.json(logs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get import session groups (for accordion log UI)
+app.get("/api/import-sessions", async (req, res) => {
+  try {
+    // Fetch ALL logs matching these actions
+    const importActions = ["PRODUCT_IMPORT_UPDATE", "PRODUCT_IMPORT_CREATE", "SALES_IMPORT", "STOCK_RECEIVED_UPDATE", "STOCK_RECEIVED_CREATE", "PRODUCT_CREATE", "PRODUCT_UPDATE", "TESTER_DAMAGE_IMPORT", "SHRINKAGE_IMPORT"];
+    const logs = await ActivityLog.find({
+      action: { $in: importActions }
+    }).sort({ timestamp: -1 });
+
+    const sessionsMap = {};
+    const legacySessions = []; // list of sessions created dynamically for legacy logs
+
+    for (const log of logs) {
+      const sid = log.importSessionId;
+      const logType = log.action.startsWith("SALES") ? "Sales Import" :
+        log.action.startsWith("STOCK") ? "Received Stock Import" :
+        log.action === "TESTER_DAMAGE_IMPORT" ? "Tester/ Damage" :
+        log.action === "SHRINKAGE_IMPORT" ? "Shrinkage" :
+        (log.action === "PRODUCT_CREATE" || log.action === "PRODUCT_UPDATE") ? "Manual Entry" : "Product Import";
+
+      // Parse quantity for legacy logs if not set
+      let qty = log.quantity;
+      if (qty === undefined || qty === null || qty === 0) {
+        if (log.action.startsWith("SALES") || log.action === "TESTER_DAMAGE_IMPORT" || log.action === "SHRINKAGE_IMPORT") {
+          const match = String(log.details || "").match(/(?:Sold|Removed|Qty):\s*(\d+)/i);
+          if (match) {
+            qty = parseInt(match[1]);
+          } else {
+            const prev = parseInt(log.previousValue);
+            const upd = parseInt(log.updatedValue);
+            qty = (!isNaN(prev) && !isNaN(upd)) ? Math.abs(prev - upd) : 0;
+          }
+        } else {
+          const upd = parseInt(log.updatedValue);
+          qty = !isNaN(upd) ? upd : 0;
+        }
+      }
+
+      const parsedMRP = log.mrp || 0;
+
+      if (sid) {
+        // Log has session ID: Group normally
+        if (!sessionsMap[sid]) {
+          sessionsMap[sid] = {
+            importSessionId: sid,
+            timestamp: log.timestamp,
+            importType: logType,
+            products: []
+          };
+        }
+        sessionsMap[sid].products.push({
+          timestamp: log.timestamp,
+          productName: log.productName,
+          barcode: log.barcode,
+          mrp: parsedMRP,
+          quantity: qty,
+          action: log.action,
+          details: log.details,
+          previousValue: log.previousValue,
+          updatedValue: log.updatedValue
+        });
+      } else {
+        // Legacy log without session ID: group by timestamp proximity (within 5 seconds) and type
+        const logTime = new Date(log.timestamp).getTime();
+        let targetSession = legacySessions.find(s =>
+          s.importType === logType &&
+          Math.abs(new Date(s.timestamp).getTime() - logTime) <= 5000
+        );
+
+        if (!targetSession) {
+          const newSid = "LEGACY_" + logTime + "_" + Math.floor(Math.random() * 1000);
+          targetSession = {
+            importSessionId: newSid,
+            timestamp: log.timestamp,
+            importType: logType,
+            products: []
+          };
+          legacySessions.push(targetSession);
+        }
+
+        targetSession.products.push({
+          timestamp: log.timestamp,
+          productName: log.productName,
+          barcode: log.barcode,
+          mrp: parsedMRP,
+          quantity: qty,
+          action: log.action,
+          details: log.details,
+          previousValue: log.previousValue,
+          updatedValue: log.updatedValue
+        });
+      }
+    }
+
+    // Merge sessionsMap and legacySessions
+    const allSessions = [
+      ...Object.values(sessionsMap),
+      ...legacySessions
+    ];
+
+    // Sort all sessions by timestamp descending
+    allSessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    res.json(allSessions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Products
+app.post("/api/products/import", async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: "Invalid body. 'products' array is required." });
+    }
+
+    const sessionId = "PROD_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    for (const item of products) {
+      const { barcode, productName, mrp, physicalQuantity } = item;
+      if (!productName) continue; // Skip rows without product name
+
+      // Search by barcode first (case-insensitive), fallback to product name (case-insensitive)
+      let product = null;
+      const cleanBarcode = barcode ? String(barcode).trim() : "";
+      const cleanName = productName ? String(productName).trim() : "";
+
+      if (cleanBarcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + cleanBarcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && cleanName) {
+        product = await Product.findOne({ productName: new RegExp("^" + cleanName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      const finalBarcode = cleanBarcode || product?.barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+      const finalMRP = mrp !== undefined ? mrp : (product?.mrp || 0);
+      const finalQty = physicalQuantity !== undefined ? physicalQuantity : 0;
+
+      if (product) {
+        const previousQty = product.physicalQuantity;
+        // Update product
+        product.productName = productName;
+        product.barcode = finalBarcode;
+        product.mrp = finalMRP;
+        product.physicalQuantity = finalQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "PRODUCT_IMPORT_UPDATE",
+          productName,
+          previousQty,
+          finalQty,
+          "Product Import",
+          finalBarcode,
+          "",
+          sessionId,
+          finalMRP,
+          finalQty
+        );
+      } else {
+        // Create product
+        const newProduct = new Product({
+          barcode: finalBarcode,
+          productName,
+          mrp: finalMRP,
+          physicalQuantity: finalQty
+        });
+        await newProduct.save();
+
+        await logActivity(
+          "PRODUCT_IMPORT_CREATE",
+          productName,
+          "N/A",
+          finalQty,
+          "Product Import",
+          finalBarcode,
+          "",
+          sessionId,
+          finalMRP,
+          finalQty
+        );
+      }
+      processedCount++;
+    }
+
+    res.json({ message: `Successfully imported/updated ${processedCount} products.`, count: processedCount });
+  } catch (err) {
+    console.error("Error in bulk product import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Received Stock Import (Adds stock to existing products or creates new products)
+app.post("/api/products/received-stock", async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: "Invalid body. 'products' array is required." });
+    }
+
+    const sessionId = "STOCK_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let updatedCount = 0;
+    let createdCount = 0;
+
+    for (const item of products) {
+      const barcode = item.barcode ? String(item.barcode).trim() : "";
+      const productName = item.productName ? String(item.productName).trim() : "";
+      const receivedQty = parseInt(item.physicalQuantity !== undefined ? item.physicalQuantity : (item.quantity !== undefined ? item.quantity : 0)) || 0;
+      const mrp = item.mrp !== undefined ? parseFloat(item.mrp) : undefined;
+
+      if (!barcode && !productName) continue;
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + barcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + productName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = previousQty + receivedQty;
+        const finalMRP = (mrp !== undefined && !isNaN(mrp)) ? mrp : product.mrp;
+
+        product.physicalQuantity = newQty;
+        if (productName) product.productName = productName;
+        if (mrp !== undefined && !isNaN(mrp)) product.mrp = mrp;
+        product.updatedAt = new Date();
+
+        await product.save();
+        updatedCount++;
+
+        await logActivity(
+          "STOCK_RECEIVED_UPDATE",
+          product.productName,
+          previousQty,
+          newQty,
+          `Received Stock (+${receivedQty})`,
+          product.barcode,
+          "",
+          sessionId,
+          finalMRP,
+          receivedQty
+        );
+      } else {
+        const finalBarcode = barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+        const finalName = productName || "Item " + finalBarcode;
+        const finalMRP = (mrp !== undefined && !isNaN(mrp)) ? mrp : 0;
+
+        const newProduct = new Product({
+          barcode: finalBarcode,
+          productName: finalName,
+          mrp: finalMRP,
+          physicalQuantity: receivedQty
+        });
+
+        await newProduct.save();
+        createdCount++;
+
+        await logActivity(
+          "STOCK_RECEIVED_CREATE",
+          finalName,
+          0,
+          receivedQty,
+          `Received Stock New (+${receivedQty})`,
+          finalBarcode,
+          "",
+          sessionId,
+          finalMRP,
+          receivedQty
+        );
+      }
+    }
+
+    const totalCount = updatedCount + createdCount;
+    res.json({
+      message: `Successfully processed Received Stock for ${totalCount} items (${updatedCount} updated, ${createdCount} newly added).`,
+      updatedCount,
+      createdCount,
+      count: totalCount
+    });
+  } catch (err) {
+    console.error("Error in received stock import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Sales
+app.post("/api/sales/import", async (req, res) => {
+  try {
+    const { sales } = req.body;
+    if (!Array.isArray(sales)) {
+      return res.status(400).json({ error: "Invalid body. 'sales' array is required." });
+    }
+
+    const sessionId = "SALES_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of sales) {
+      const { barcode, productName, quantity } = item;
+      const soldQty = parseInt(quantity) || 0;
+      if (soldQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - soldQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "SALES_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Sales Import",
+          product.barcode,
+          `Sold: ${soldQty} units`,
+          sessionId,
+          product.mrp,
+          soldQty
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} sales transactions.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in sales import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Tester/Damage
+app.post("/api/tester-damage/import", async (req, res) => {
+  try {
+    const { testerDamage } = req.body;
+    if (!Array.isArray(testerDamage)) {
+      return res.status(400).json({ error: "Invalid body. 'testerDamage' array is required." });
+    }
+
+    const sessionId = "TESTER_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of testerDamage) {
+      const { barcode, productName, quantity } = item;
+      const removeQty = parseInt(quantity) || 0;
+      if (removeQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - removeQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "TESTER_DAMAGE_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Tester/ Damage",
+          product.barcode,
+          `Removed: ${removeQty} units (Tester/Damage)`,
+          sessionId,
+          product.mrp,
+          removeQty
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} tester/damage records.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in tester/damage import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Shrinkage
+app.post("/api/shrinkage/import", async (req, res) => {
+  try {
+    const { shrinkage } = req.body;
+    if (!Array.isArray(shrinkage)) {
+      return res.status(400).json({ error: "Invalid body. 'shrinkage' array is required." });
+    }
+
+    const sessionId = "SHRINK_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of shrinkage) {
+      const { barcode, productName, quantity } = item;
+      const removeQty = parseInt(quantity) || 0;
+      if (removeQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - removeQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "SHRINKAGE_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Shrinkage",
+          product.barcode,
+          `Removed: ${removeQty} units (Shrinkage)`,
+          sessionId,
+          product.mrp,
+          removeQty
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} shrinkage records.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in shrinkage import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get total scans for all barcodes
+app.get("/api/audit/totals", async (req, res) => {
+  try {
+    const totals = await BCScan.aggregate([
+      { $group: { _id: "$barcode", count: { $sum: 1 } } }
+    ]);
+    const scanCountMap = {};
+    totals.forEach(t => {
+      scanCountMap[t._id] = t.count;
+    });
+    res.json(scanCountMap);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get global reconciliation report
+app.get("/api/reconciliation/report", async (req, res) => {
+  try {
+    const { barcodes } = req.query;
+    let barcodeFilter = null;
+    if (barcodes) {
+      barcodeFilter = barcodes.split(",").map(b => b.trim()).filter(Boolean);
+    }
+
+    // 1. Get totals from BCScan
+    const matchStage = barcodeFilter ? { $match: { barcode: { $in: barcodeFilter } } } : null;
+    const aggregateStages = [];
+    if (matchStage) aggregateStages.push(matchStage);
+    aggregateStages.push({ $group: { _id: "$barcode", count: { $sum: 1 } } });
+
+    const totals = await BCScan.aggregate(aggregateStages);
+    const scanCountMap = {};
+    totals.forEach(t => {
+      scanCountMap[t._id] = t.count;
+    });
+
+    // 2. Build reconciliation data by iterating over all Products
+    const reconciliationData = [];
+    let totalPhyQty = 0;
+    let totalPhyAmt = 0;
+    let totalSysQty = 0;
+    let totalSysAmt = 0;
+    let totalDiffQty = 0;
+    let totalDiffAmt = 0;
+
+    const productQuery = barcodeFilter ? { barcode: { $in: barcodeFilter } } : {};
+    const products = await Product.find(productQuery);
+
+    for (const product of products) {
+      const phyQty = product.physicalQuantity || 0;
+      const sysQty = scanCountMap[product.barcode] || 0;
+      const mrp = product.mrp || 0;
+
+      const phyAmt = phyQty * mrp;
+      const sysAmt = sysQty * mrp;
+      const diff = sysQty - phyQty;
+      const diffAmt = diff * mrp;
+
+      reconciliationData.push({
+        barcode: product.barcode,
+        productName: product.productName,
+        phyQty,
+        mrp,
+        phyAmt,
+        sysQty,
+        sysAmt,
+        diff,
+        diffAmt
+      });
+
+      totalPhyQty += phyQty;
+      totalPhyAmt += phyAmt;
+      totalSysQty += sysQty;
+      totalSysAmt += sysAmt;
+      totalDiffQty += diff;
+      totalDiffAmt += diffAmt;
+    }
+
+    // Add any unknown scanned barcodes that aren't in Product DB
+    const knownBarcodes = new Set(products.map(p => p.barcode));
+    for (const [barcode, sysQty] of Object.entries(scanCountMap)) {
+      if (!knownBarcodes.has(barcode)) {
+        if (barcodeFilter && !barcodeFilter.includes(barcode)) {
+          continue;
+        }
+        reconciliationData.push({
+          barcode: barcode,
+          productName: "Unknown Product",
+          phyQty: 0,
+          mrp: 0,
+          phyAmt: 0,
+          sysQty,
+          sysAmt: 0,
+          diff: sysQty,
+          diffAmt: 0
+        });
+        totalSysQty += sysQty;
+        totalDiffQty += sysQty;
+      }
+    }
+
+    res.json({
+      data: reconciliationData,
+      summary: {
+        totalPhyQty,
+        totalPhyAmt,
+        totalSysQty,
+        totalSysAmt,
+        totalDiffQty,
+        totalDiffAmt
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== AUDIT SESSION ENDPOINTS ==========
+
+// --- Audit Session Schema ---
+const auditSessionSchema = new mongoose.Schema({
+  auditId: { type: String, required: true, unique: true },
+  name: { type: String, default: "" },
+  startTime: { type: Date, default: Date.now },
+  endTime: { type: Date, default: null },
+  status: { type: String, enum: ["active", "saved", "discarded"], default: "active" },
+  scans: [{ barcode: String, timestamp: Date, scanner: String }],
+  totalScannedItems: { type: Number, default: 0 }
+});
+
+const AuditSession = mongoose.model("AuditSession", auditSessionSchema);
+
+// Start a new audit session
+app.post("/api/audit-sessions", async (req, res) => {
+  try {
+    const auditId = "AUDIT-" + Date.now();
+    const session = new AuditSession({ auditId, status: "active" });
+    await session.save();
+    res.json({ message: "Audit session started", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add a scan to an active session (called when auditActive)
+app.post("/api/audit-sessions/:id/scan", async (req, res) => {
+  try {
+    const { barcode, scanner } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    if (session.status !== "active") return res.status(400).json({ error: "Session is not active" });
+    session.scans.push({ barcode, timestamp: new Date(), scanner: scanner || "unknown" });
+    session.totalScannedItems = session.scans.length;
+    await session.save();
+    res.json({ message: "Scan recorded", totalScannedItems: session.totalScannedItems });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a specific scan from an active audit session
+app.delete("/api/audit-sessions/:id/scan", async (req, res) => {
+  try {
+    const { barcode } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (barcode) {
+      const idx = session.scans.findIndex(s => s.barcode === barcode);
+      if (idx !== -1) session.scans.splice(idx, 1);
+    }
+
+    session.totalScannedItems = session.scans.length;
+    await session.save();
+    res.json({ message: "Scan deleted successfully", totalScannedItems: session.totalScannedItems });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// End / Save an audit session
+app.put("/api/audit-sessions/:id/end", async (req, res) => {
+  try {
+    const { save, name, scans } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    session.endTime = new Date();
+    session.status = save ? "saved" : "discarded";
+    session.name = name || session.auditId;
+    if (scans && Array.isArray(scans)) {
+      session.scans = scans;
+    }
+    session.totalScannedItems = session.scans.length;
+    await session.save();
+    res.json({ message: save ? "Audit saved successfully" : "Audit discarded", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update scans of a saved or active audit session
+app.put("/api/audit-sessions/:id/scans", async (req, res) => {
+  try {
+    const { scans } = req.body;
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    if (scans && Array.isArray(scans)) {
+      session.scans = scans;
+      session.totalScannedItems = session.scans.length;
+      await session.save();
+    }
+    res.json({ message: "Audit session scans updated", session });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get currently active audit session
+app.get("/api/audit-sessions/active/current", async (req, res) => {
+  try {
+    const session = await AuditSession.findOne({ status: "active" }).sort({ startTime: -1 });
+    res.json({ session: session || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all saved audit sessions
+app.get("/api/audit-sessions", async (req, res) => {
+  try {
+    const sessions = await AuditSession.find({ status: "saved" })
+      .sort({ startTime: -1 })
+      .select("-scans"); // Exclude scan data for list view (performance)
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single audit session with full scan details
+app.get("/api/audit-sessions/:id", async (req, res) => {
+  try {
+    const session = await AuditSession.findById(req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    res.json(session);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete an audit session
+app.delete("/api/audit-sessions/:id", async (req, res) => {
+  try {
+    await AuditSession.findByIdAndDelete(req.params.id);
+    res.json({ message: "Audit session deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(API_PORT, () => {
+  console.log(`🌐 API Server running on http://localhost:${API_PORT}`);
+});
+
+
+// --- WebSocket Setup ---
+const wss = new WebSocketServer({ port: WSS_PORT });
+console.log(`🚀 Serial WebSocket Server running on ws://localhost:${WSS_PORT}`);
+
+const clients = new Set();
+
+wss.on("connection", (ws) => {
+  console.log("🔌 Client connected");
+  clients.add(ws);
+  ws.on("close", () => {
+    console.log("❌ Client disconnected");
+    clients.delete(ws);
+  });
+});
+
+function broadcast(data) {
+  const message = JSON.stringify(data);
+  clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(message);
+    }
+  });
+}
+
+// Function to initialize serial ports
+async function initSerialPorts() {
+  try {
+    const ports = await SerialPort.list();
+    console.log("🔍 Available ports:", ports.map(p => p.path).join(", ") || "None found");
+
+    ports.forEach((portInfo) => {
+      console.log(`🔌 Attempting to open port: ${portInfo.path}`);
+      openPort(portInfo.path);
+    });
+  } catch (err) {
+    console.error("❌ Error listing ports:", err);
+  }
+}
+
+function openPort(path) {
+  const port = new SerialPort({
+    path: path,
+    baudRate: 9600,
+    autoOpen: false,
+  });
+
+  const parser = port.pipe(new ReadlineParser({ delimiter: '\r' }));
+
+  port.on("open", () => {
+    console.log(`✅ Port Opened: ${path}`);
+  });
+
+  port.on("error", (err) => {
+    console.error(`❌ Port Error (${path}):`, err.message);
+    if (err.message.includes("Permission denied") || err.message.includes("Access denied")) {
+      console.warn(`🚫 Skipping retries for ${path} due to permission issues.`);
+      return;
+    }
+    setTimeout(() => {
+      if (!port.isOpen) {
+        console.log(`🔄 Retrying port ${path}...`);
+        port.open((err) => { if (err) console.error(err.message); });
+      }
+    }, 5000);
+  });
+
+  parser.on("data", async (data) => {
+    const cleanData = data.toString().trim();
+    if (cleanData) {
+      try {
+        const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+        if (!activeSession) {
+          console.log(`📡 [${path}] Scanned: ${cleanData} (Ignored - No active audit session)`);
+          return;
+        }
+        console.log(`📡 [${path}] Scanned: ${cleanData}`);
+        broadcast({
+          source: "serial",
+          port: path,
+          value: cleanData,
+          timestamp: Date.now()
+        });
+      } catch (err) {
+        console.error("Error checking active session for serial scan:", err);
+      }
+    }
+  });
+
+  port.on("close", () => {
+    console.log(`⚠️ Port Closed: ${path}`);
+    setTimeout(() => {
+      console.log(`🔄 Re-opening port ${path}...`);
+      port.open((err) => { if (err) console.error(err.message); });
+    }, 2000);
+  });
+
+  port.open((err) => {
+    if (err) {
+      console.error(`❌ Initial open failed (${path}):`, err.message);
+    }
+  });
+}
+
+initSerialPorts();
