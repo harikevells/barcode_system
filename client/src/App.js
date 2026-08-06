@@ -6,7 +6,7 @@ import Select from "react-select";
 import { BarChartIcon, ClipboardIcon, BoxIcon, ScrollIcon, FileIcon, PlusIcon, DownloadIcon, TrendingDownIcon, UploadIcon, ArrowLeftIcon, SearchIcon, FolderIcon, TrashIcon, LockIcon, EyeIcon, EyeOffIcon } from "./icons";
 
 
-const API_BASE_URL = "http://localhost:5001/api";
+const API_BASE_URL = "http://16.16.123.89:5001/api";
 
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
@@ -657,7 +657,7 @@ function Dashboard() {
 
     const connectWS = () => {
       if (isUnmounted) return;
-      const ws = new WebSocket("ws://127.0.0.1:8080");
+      const ws = new WebSocket("ws://16.16.123.89:8080");
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -967,10 +967,10 @@ function RackHistory() {
     const connectWS = () => {
       if (isUnmounted) return;
       try {
-        ws = new WebSocket("ws://127.0.0.1:8080");
+        ws = new WebSocket("ws://16.16.123.89:8080");
 
         ws.onopen = () => {
-          console.log("✅ WebSocket connected to ws://127.0.0.1:8080");
+          console.log("✅ WebSocket connected to ws://16.16.123.89:8080");
           if (!isUnmounted) setWsStatus("Connected ✅");
         };
 
@@ -2384,7 +2384,7 @@ function AuditScanning() {
 
   useEffect(() => {
     if (compareAuditId) return; // Do not connect WS if we are just comparing an old session
-    const ws = new WebSocket("ws://127.0.0.1:8080");
+    const ws = new WebSocket("ws://16.16.123.89:8080");
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
