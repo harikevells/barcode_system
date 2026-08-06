@@ -77,6 +77,16 @@ function Dashboard({ user }) {
     }
   };
 
+  const updateExpiry = async (id, newExpiryDate) => {
+    if (!newExpiryDate) return;
+    try {
+      await updateDoc(doc(db, 'licenses', id), { expiryDate: newExpiryDate });
+      toast.success("Expiry date updated successfully!");
+    } catch (error) {
+      toast.error("Error updating expiry date: " + error.message);
+    }
+  };
+
   const reassignMachine = async (id) => {
     if (!window.confirm("Are you sure you want to clear the machine ID? This will allow the license to be used on a new machine.")) return;
     try {
@@ -169,7 +179,22 @@ function Dashboard({ user }) {
                         {lic.active ? 'Active' : 'Disabled'}
                       </span>
                     </td>
-                    <td>{lic.expiryDate}</td>
+                    <td>
+                      <input 
+                        type="date" 
+                        value={lic.expiryDate} 
+                        onChange={e => updateExpiry(lic.id, e.target.value)}
+                        style={{ 
+                          padding: '6px 10px', 
+                          borderRadius: '6px', 
+                          border: '1px solid #cbd5e1', 
+                          fontSize: '13px',
+                          fontFamily: 'inherit',
+                          cursor: 'pointer',
+                          background: '#ffffff'
+                        }} 
+                      />
+                    </td>
                     <td style={{ maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={lic.machineId}>
                       {lic.machineId || <span style={{ color: '#94a3b8' }}>Unassigned</span>}
                     </td>

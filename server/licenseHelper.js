@@ -91,7 +91,8 @@ const saveOfflineCache = (key) => {
 
 const validateLicenseOnline = async (key) => {
   try {
-    const docRef = doc(db, "licenses", key);
+    const trimmedKey = (key || "").trim();
+    const docRef = doc(db, "licenses", trimmedKey);
     const docSnap = await getDoc(docRef);
 
     if (!docSnap.exists()) {
@@ -103,7 +104,11 @@ const validateLicenseOnline = async (key) => {
 
     if (!licenseData.active) return { valid: false, message: "License Deactivated" };
 
-    if (new Date() > new Date(licenseData.expiryDate)) {
+    // Get current local date as "YYYY-MM-DD"
+    const today = new Date();
+    const localDateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    if (localDateStr > licenseData.expiryDate) {
       return { valid: false, message: "License Expired" };
     }
 
@@ -115,7 +120,7 @@ const validateLicenseOnline = async (key) => {
       await updateDoc(docRef, { lastVerifiedAt: new Date().toISOString() });
     }
 
-    saveOfflineCache(key);
+    saveOfflineCache(trimmedKey);
     const result = { valid: true, message: "License Validated Successfully" };
     setCachedStatus(result);
     return result;

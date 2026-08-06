@@ -188,10 +188,163 @@ function Login({ onLogin }) {
 }
 
 
+// --- ADMIN AUTH MODAL ---
+function AdminAuthModal({ isOpen, onClose, onSuccess }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  if (!isOpen) return null;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (username === "admin" && password === "superadmin123") {
+      setError("");
+      setUsername("");
+      setPassword("");
+      onSuccess();
+      onClose();
+    } else {
+      setError("Invalid username or password.");
+    }
+  };
+
+  return (
+    <div style={{
+      position: "fixed",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: "rgba(0, 0, 0, 0.5)",
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      zIndex: 9999,
+      fontFamily: "inherit"
+    }}>
+      <div style={{
+        background: "#ffffff",
+        padding: "24px 32px",
+        borderRadius: "12px",
+        boxShadow: "0 10px 25px rgba(0,0,0,0.15)",
+        width: "100%",
+        maxWidth: "380px"
+      }}>
+        <h3 style={{ margin: "0 0 12px 0", color: "#1e293b", fontSize: "18px", fontWeight: 700 }}>
+          🔒 Higher Authority Authorization
+        </h3>
+        <p style={{ margin: "0 0 16px 0", color: "#64748b", fontSize: "13px" }}>
+          Please enter admin credentials to authorize this action.
+        </p>
+
+        {error && (
+          <div style={{
+            background: "#fee2e2",
+            color: "#b91c1c",
+            padding: "8px 12px",
+            borderRadius: "6px",
+            fontSize: "13px",
+            marginBottom: "12px",
+            fontWeight: 500
+          }}>
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: "12px" }}>
+            <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#475569", marginBottom: "4px" }}>
+              Username
+            </label>
+            <input
+              type="text"
+              required
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Enter admin username"
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #cbd5e1",
+                fontSize: "14px",
+                boxSizing: "border-box"
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: "20px" }}>
+            <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "#475569", marginBottom: "4px" }}>
+              Password
+            </label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter admin password"
+              style={{
+                width: "100%",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #cbd5e1",
+                fontSize: "14px",
+                boxSizing: "border-box"
+              }}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => {
+                setError("");
+                setUsername("");
+                setPassword("");
+                onClose();
+              }}
+              style={{
+                padding: "8px 16px",
+                background: "#f1f5f9",
+                color: "#475569",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              style={{
+                padding: "8px 16px",
+                background: "#b91c1c",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "6px",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: "pointer"
+              }}
+            >
+              Authorize & Clear
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+
 // --- GLOBAL HEADER COMPONENT ---
 function Header() {
   const location = useLocation();
   const path = location.pathname;
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
 
   const navItems = [
     { label: "Dashboard", path: "/", icon: <BarChartIcon size={18} /> },
@@ -288,16 +441,7 @@ function Header() {
         </Link>
 
         <button
-          onClick={async () => {
-            if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
-              try {
-                await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
-                window.location.reload();
-              } catch (err) {
-                console.error("Error clearing all data:", err);
-              }
-            }
-          }}
+          onClick={() => setIsAuthOpen(true)}
           style={{
             display: "flex",
             alignItems: "center",
@@ -343,6 +487,21 @@ function Header() {
           Logout
         </button>
       </div>
+
+      <AdminAuthModal 
+        isOpen={isAuthOpen} 
+        onClose={() => setIsAuthOpen(false)} 
+        onSuccess={async () => {
+          if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
+            try {
+              await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
+              window.location.reload();
+            } catch (err) {
+              console.error("Error clearing all data:", err);
+            }
+          }
+        }}
+      />
     </header>
   );
 }
@@ -412,6 +571,8 @@ function Dashboard() {
   const [lastInputSource, setLastInputSource] = useState("Waiting for scans...");
   const [scannerStatuses, setScannerStatuses] = useState({});
   const [serverScannerCount, setServerScannerCount] = useState(2);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [authSuccessCallback, setAuthSuccessCallback] = useState(null);
 
   useEffect(() => {
     try {
@@ -600,29 +761,35 @@ function Dashboard() {
   };
 
   const handleClear = async () => {
-    if (window.confirm("WARNING: This will delete ALL data from the database. Proceed?")) {
-      try {
-        await fetch(`${API_BASE_URL}/clear`, { method: "DELETE" });
-        setAData([]);
-        setBData([]);
-        setLastInputSource("Database and UI Cleared.");
-      } catch (err) {
-        console.error("Error clearing data:", err);
+    setAuthSuccessCallback(() => async () => {
+      if (window.confirm("WARNING: This will delete ALL data from the database. Proceed?")) {
+        try {
+          await fetch(`${API_BASE_URL}/clear`, { method: "DELETE" });
+          setAData([]);
+          setBData([]);
+          setLastInputSource("Database and UI Cleared.");
+        } catch (err) {
+          console.error("Error clearing data:", err);
+        }
       }
-    }
+    });
+    setIsAuthOpen(true);
   };
 
   const handleClearAll = async () => {
-    if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
-      try {
-        await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
-        setAData([]);
-        setBData([]);
-        setLastInputSource("All Databases and UI Cleared.");
-      } catch (err) {
-        console.error("Error clearing all data:", err);
+    setAuthSuccessCallback(() => async () => {
+      if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
+        try {
+          await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
+          setAData([]);
+          setBData([]);
+          setLastInputSource("All Databases and UI Cleared.");
+        } catch (err) {
+          console.error("Error clearing all data:", err);
+        }
       }
-    }
+    });
+    setIsAuthOpen(true);
   };
 
   const StatusDot = ({ status }) => (
@@ -728,6 +895,11 @@ function Dashboard() {
           })}
         </div>
       </div>
+      <AdminAuthModal 
+        isOpen={isAuthOpen} 
+        onClose={() => setIsAuthOpen(false)} 
+        onSuccess={authSuccessCallback} 
+      />
     </div>
   );
 }
@@ -2056,7 +2228,7 @@ function ProductManagement() {
 
           {/* Summary Cards */}
           <div style={{ display: "flex", gap: "10px", marginBottom: "20px", flexWrap: "wrap" }}>
-            {/* Card 1: Overall Product Quantity */}
+            {/* Card 1: Overall Product Count */}
             <div style={{
               background: "linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)",
               border: "1px solid #bfdbfe",
@@ -2072,7 +2244,7 @@ function ProductManagement() {
               onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
               onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
             >
-              <span style={{ fontSize: "14px", color: "#1e3a8a", fontWeight: 600 }}>Overall Product Quantity:</span>
+              <span style={{ fontSize: "14px", color: "#1e3a8a", fontWeight: 600 }}>Overall Product Count:</span>
               <span style={{ fontSize: "15px", fontWeight: 800, color: "#1e3a8a" }}>{overallProductQty}</span>
             </div>
 
@@ -2739,7 +2911,7 @@ function ActivityLogs() {
 
       summarySheet.addRow(["Overall Product Count", overallProductCount, "N/A"]);
       summarySheet.addRow(["Total Product Quantity", overallProductQty, overallProductAmt]);
-      summarySheet.addRow(["Total Out Product Qty", totalSales, totalSalesAmt]);
+      summarySheet.addRow(["Total Out Product Quantity", totalSales, totalSalesAmt]);
       summarySheet.addRow(["Total Available Product Quantity", totalSystemQty, totalSystemAmt]);
 
       // Format Summary numbers
@@ -3014,7 +3186,7 @@ function ActivityLogs() {
             </span>
           </div>
 
-          {/* Card 4: Total Out Product Qty */}
+          {/* Card 4: Total Out Product Quantity */}
           <div style={{
             background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
             border: "1px solid #fed7aa",
@@ -3031,7 +3203,7 @@ function ActivityLogs() {
           onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#c2410c", fontWeight: 500 }}>
-              Total Out Product Qty: <strong style={{ fontWeight: 700 }}>{totalSales}</strong>
+              Total Out Product Quantity: <strong style={{ fontWeight: 700 }}>{totalSales}</strong>
             </span>
           </div>
 
@@ -3269,7 +3441,7 @@ function LicenseWrapper({ children }) {
       const res = await fetch(`${API_BASE_URL}/license/activate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: keyInput })
+        body: JSON.stringify({ key: keyInput.trim() })
       });
       const data = await res.json();
       if (data.valid) {
