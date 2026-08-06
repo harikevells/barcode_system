@@ -5,6 +5,7 @@ Supports multiple HID keyboard barcode scanners
 
 import signal
 import logging
+from logging.handlers import RotatingFileHandler
 import time
 import os
 import threading
@@ -25,7 +26,7 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler("/home/pi/BC/logs/scanner.log"),
+        RotatingFileHandler("/home/pi/BC/logs/scanner.log", maxBytes=5*1024*1024, backupCount=5),
         logging.StreamHandler()
     ]
 )

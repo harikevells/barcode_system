@@ -6,7 +6,7 @@ import Select from "react-select";
 import { BarChartIcon, ClipboardIcon, BoxIcon, ScrollIcon, FileIcon, PlusIcon, DownloadIcon, TrendingDownIcon, UploadIcon, ArrowLeftIcon, SearchIcon, FolderIcon, TrashIcon, LockIcon, EyeIcon, EyeOffIcon } from "./icons";
 
 
-const API_BASE_URL = "http://16.16.123.89:5001/api";
+const API_BASE_URL = "http://localhost:5001/api";
 
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
@@ -133,6 +133,8 @@ function Login({ onLogin }) {
             <div style={{ marginBottom: '24px' }}>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#8892b0', marginBottom: '8px' }}>User Name</label>
               <input
+                id="username"
+                name="username"
                 type="text"
                 value={username}
                 onChange={e => setUsername(e.target.value)}
@@ -144,6 +146,8 @@ function Login({ onLogin }) {
               <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#8892b0', marginBottom: '8px' }}>Pass Word</label>
               <div style={{ position: 'relative' }}>
                 <input
+                  id="password"
+                  name="password"
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
@@ -163,7 +167,7 @@ function Login({ onLogin }) {
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '40px' }}>
               <label style={{ fontSize: '12px', color: '#8892b0', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                <input type="checkbox" style={{ accentColor: '#0ea5e9' }} /> Remember Me
+                <input id="rememberMe" name="rememberMe" type="checkbox" style={{ accentColor: '#0ea5e9' }} /> Remember Me
               </label>
               <a href="#" style={{ fontSize: '12px', color: '#ef4444', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}><LockIcon size={14} /> Forgot Password?</a>
             </div>
@@ -455,10 +459,11 @@ function Dashboard() {
       }
 
       const firstChar = upperCode.charAt(0);
-      if (firstChar < "A" || firstChar > "Z") {
-        console.warn("Invalid product scan (no scanner prefix A-Z):", code);
-        setLastInputSource(`⚠️ Blocked: Missing scanner prefix (${source})`);
-        return;
+      let colNum = 1;
+      if (firstChar >= "A" && firstChar <= "Z") {
+        colNum = firstChar.charCodeAt(0) - 64;
+      } else if (source && source.includes(":") && !isNaN(parseInt(source.split(":").pop()))) {
+        colNum = parseInt(source.split(":").pop()) || 1;
       }
 
       // De-duplication: Ignore if exactly the same code was scanned in the last 2000ms
@@ -479,33 +484,48 @@ function Dashboard() {
         console.error("Error saving scan:", err);
       }
 
-      const colNum = firstChar.charCodeAt(0) - 64;
       const timeStr = new Date().toLocaleTimeString();
 
       setDashboardScans((prev) => [...prev, { value: code, ts: nowTs, scanner: colNum }]);
-      setLastInputSource(`Scanner ${colNum} → Column ${firstChar} (${source} @ ${timeStr})`);
+      setLastInputSource(`Scanner ${colNum} (${source} @ ${timeStr}): ${code}`);
       setScannerStatuses((prev) => ({ ...prev, [colNum]: "Active" }));
     };
 
+    let isUnmounted = false;
+    let reconnectTimeout = null;
+
     const connectWS = () => {
-      const ws = new WebSocket("ws://16.16.123.89:8080");
+      if (isUnmounted) return;
+      const ws = new WebSocket("ws://127.0.0.1:8080");
       wsRef.current = ws;
-      ws.onopen = () => setWsStatus("Connected");
+
+      ws.onopen = () => {
+        if (!isUnmounted) setWsStatus("Connected");
+      };
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.source === "system" && data.activeScannersCount) {
             setServerScannerCount(data.activeScannersCount);
           } else if (data.source === "serial") {
-            processScan(data.value, `Serial:${data.port.split('\\').pop()}`);
+            const portName = data.port ? data.port.split('\\').pop() : '';
+            processScan(data.value, `Serial:${portName}`);
           }
         } catch (e) {
           console.error("WS Parse Error", e);
         }
       };
+
       ws.onclose = () => {
+        if (isUnmounted) return;
         setWsStatus("Disconnected");
-        setTimeout(connectWS, 2000);
+        reconnectTimeout = setTimeout(connectWS, 2000);
+      };
+
+      ws.onerror = () => {
+        if (isUnmounted) return;
+        setWsStatus("Disconnected");
       };
     };
 
@@ -533,9 +553,23 @@ function Dashboard() {
 
     connectWS();
     window.addEventListener("keydown", handleKeydownDetection);
+
     return () => {
+      isUnmounted = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       window.removeEventListener("keydown", handleKeydownDetection);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        const ws = wsRef.current;
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.onopen = () => { try { ws.close(); } catch (e) { } };
+        } else if (ws.readyState === WebSocket.OPEN) {
+          try { ws.close(); } catch (e) { }
+        }
+      }
     };
   }, []);
 
@@ -701,80 +735,163 @@ function Dashboard() {
 // --- LIVE AUDIT (formerly HISTORY) COMPONENT ---
 function RackHistory() {
   const navigate = useNavigate();
-  const [activeSession, setActiveSession] = useState(null);
-  const [sessionScans, setSessionScans] = useState(() => {
-    try {
-      const saved = localStorage.getItem("sessionScans");
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem("sessionScans", JSON.stringify(sessionScans));
-    } catch (e) { }
-  }, [sessionScans]);
+  // Load session purely from DB on mount — do NOT use stale localStorage as initial state
+  const [activeSession, setActiveSession] = useState(null);
+  const [sessionLoaded, setSessionLoaded] = useState(false); // prevents flash of "Start Audit" enabled
+  const [sessionScans, setSessionScans] = useState([]);
 
   const [selectedBarcodes, setSelectedBarcodes] = useState([]);
-
   const [manualInputs, setManualInputs] = useState({});
   const [manualScannerCount, setManualScannerCount] = useState(null);
   const [serverScannerCount, setServerScannerCount] = useState(2);
 
+  // On mount: fetch active session from DB and restore state
   useEffect(() => {
     fetch(`${API_BASE_URL}/scanners/count`)
       .then(res => res.json())
       .then(data => { if (data && data.count) setServerScannerCount(data.count); })
       .catch(() => { });
+
+    fetch(`${API_BASE_URL}/audit-sessions/active/current`)
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.session && data.session.status === "active") {
+          setActiveSession(data.session);
+          if (Array.isArray(data.session.scans)) {
+            setSessionScans(data.session.scans);
+          }
+        } else {
+          // No active session in DB — clear any stale localStorage
+          setActiveSession(null);
+          setSessionScans([]);
+          try {
+            localStorage.removeItem("activeSession");
+            localStorage.removeItem("sessionScans");
+          } catch (e) { }
+        }
+      })
+      .catch(() => { })
+      .finally(() => setSessionLoaded(true));
   }, []);
 
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [auditName, setAuditName] = useState("");
 
+  // Keep a ref for WebSocket handler to always have latest session
   const activeSessionRef = useRef(null);
-
+  const [wsStatus, setWsStatus] = useState("Connecting...");
   useEffect(() => {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
 
+  // WebSocket connection — clean reconnect loop
   useEffect(() => {
-    const ws = new WebSocket("ws://16.16.123.89:8080");
-    ws.onmessage = async (event) => {
+    let isUnmounted = false;
+    let ws = null;
+    let reconnectTimeout = null;
+
+    const connectWS = () => {
+      if (isUnmounted) return;
       try {
-        const data = JSON.parse(event.data);
-        if (data.source === "system" && data.activeScannersCount) {
-          setServerScannerCount(data.activeScannersCount);
-        } else if (data.source === "serial") {
-          const currentSession = activeSessionRef.current;
-          if (currentSession && currentSession.status === "active") {
-            const scannerChar = data.value.charAt(0).toUpperCase();
-            const col = (scannerChar >= 'A' && scannerChar <= 'Z') ? (scannerChar.charCodeAt(0) - 64) : 1;
-            fetch(`${API_BASE_URL}/audit-sessions/${currentSession._id}/scan`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ barcode: data.value, scanner: String(col) })
-            });
-            setSessionScans(prev => [...prev, { barcode: data.value, timestamp: new Date(), scanner: String(col) }]);
+        ws = new WebSocket("ws://127.0.0.1:8080");
+
+        ws.onopen = () => {
+          console.log("✅ WebSocket connected to ws://127.0.0.1:8080");
+          if (!isUnmounted) setWsStatus("Connected ✅");
+        };
+
+        ws.onmessage = (event) => {
+          console.log("📡 WS raw message:", event.data);
+          try {
+            const data = JSON.parse(event.data);
+            if (data.source === "system" && data.activeScannersCount) {
+              if (!isUnmounted) setServerScannerCount(data.activeScannersCount);
+            } else if (data.source === "serial" && data.value) {
+              const currentSession = activeSessionRef.current;
+              console.log("🔍 Scan received, session ref:", currentSession ? currentSession.status : "NO SESSION");
+              if (!currentSession || currentSession.status !== "active") {
+                console.warn("⚠️ Scan dropped - no active session. Current ref:", currentSession);
+                return;
+              }
+              const rawBarcode = String(data.value).trim();
+              // Extract scanner number from data.scanner OR parse from port string e.g. "RaspberryPi (Scanner 1)"
+              let scannerNum = "1";
+              if (data.scanner) {
+                scannerNum = String(data.scanner);
+              } else if (data.port) {
+                const match = String(data.port).match(/(\d+)/);
+                if (match) scannerNum = match[1];
+              }
+              console.log("✅ Saving scan:", rawBarcode, "scanner:", scannerNum);
+
+              fetch(`${API_BASE_URL}/audit-sessions/${currentSession._id}/scan`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ barcode: rawBarcode, scanner: scannerNum })
+              }).catch(err => console.error("Save scan error:", err));
+
+              if (!isUnmounted) {
+                setSessionScans(prev => [...prev, { barcode: rawBarcode, timestamp: new Date(), scanner: scannerNum }]);
+              }
+            }
+          } catch (e) {
+            console.error("WS message parse error:", e);
           }
+        };
+
+        ws.onclose = () => {
+          if (!isUnmounted) {
+            console.log("⚠️ WebSocket closed. Reconnecting in 2s...");
+            setWsStatus("Reconnecting...");
+            reconnectTimeout = setTimeout(connectWS, 2000);
+          }
+        };
+
+        ws.onerror = () => {
+          if (!isUnmounted) {
+            try { ws.close(); } catch (e) { }
+          }
+        };
+      } catch (e) {
+        console.error("WebSocket creation failed:", e);
+        if (!isUnmounted) {
+          reconnectTimeout = setTimeout(connectWS, 2000);
         }
-      } catch (e) { }
+      }
     };
-    return () => ws.close();
+
+    connectWS();
+
+    return () => {
+      isUnmounted = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        if (ws.readyState === WebSocket.CONNECTING) {
+          ws.onopen = () => { try { ws.close(); } catch (e) { } };
+        } else if (ws.readyState === WebSocket.OPEN) {
+          try { ws.close(); } catch (e) { }
+        }
+      }
+    };
   }, []);
 
   const handleStartAudit = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/audit-sessions`, { method: "POST" });
       const data = await res.json();
-      setActiveSession(data.session);
-      setSessionScans([]);
-      try {
-        localStorage.setItem("activeSession", JSON.stringify(data.session));
-        localStorage.setItem("sessionScans", JSON.stringify([]));
-      } catch (e) { }
+      if (data && data.session) {
+        // Update ref IMMEDIATELY so WebSocket handler uses latest session right away
+        activeSessionRef.current = data.session;
+        setActiveSession(data.session);
+        setSessionScans([]);
+        console.log("🟢 Audit started, session ID:", data.session._id);
+      }
     } catch (err) {
       console.error(err);
       alert("Failed to start audit.");
@@ -789,12 +906,7 @@ function RackHistory() {
     const barcode = (manualInputs[column] || "").trim();
     if (!barcode) return;
 
-    if (!barcode.toUpperCase().startsWith(column)) {
-      alert(`Manual entry for Column ${column} must start with "${column}"!`);
-      return;
-    }
-
-    const colNum = column.charCodeAt(0) - 64;
+    const colNum = typeof column === "number" ? column : (column.charCodeAt ? column.charCodeAt(0) - 64 : 1);
 
     try {
       await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}/scan`, {
@@ -905,28 +1017,29 @@ function RackHistory() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
-  const getScannerNumber = (barcode) => {
-    if (!barcode) return null;
-    const char = barcode.charAt(0).toUpperCase();
-    if (char >= 'A' && char <= 'Z') {
-      return char.charCodeAt(0) - 64;
+  const getScannerNumber = (item) => {
+    if (!item) return 1;
+    const scanner = typeof item === 'object' ? item.scanner : null;
+    if (scanner) {
+      const num = Number(scanner);
+      if (!isNaN(num) && num > 0) return num;
     }
-    return null;
+    return 1;
   };
 
   const detectedNums = Array.from(
     new Set(
       sessionScans
-        .map(item => getScannerNumber(item.barcode))
+        .map(item => getScannerNumber(item))
         .filter(n => n !== null)
     )
   );
-  const autoCount = Math.max(serverScannerCount, ...detectedNums);
+  const autoCount = Math.max(serverScannerCount, ...detectedNums, 2);
   const maxScannerNum = manualScannerCount || autoCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   const scansByScanner = scannersToShow.map(num =>
-    filteredData.filter(item => getScannerNumber(item.barcode) === num)
+    filteredData.filter(item => getScannerNumber(item) === num)
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
 
@@ -990,20 +1103,20 @@ function RackHistory() {
               </select>
               <button
                 onClick={handleStartAudit}
-                disabled={activeSession !== null}
+                disabled={!sessionLoaded || activeSession !== null}
                 style={{
                   background: activeSession ? "#a5d6a7" : "linear-gradient(180deg, #66bb6a 0%, #43a047 100%)",
                   color: "#fff",
                   border: "none",
                   padding: "10px 20px",
                   borderRadius: 20,
-                  cursor: activeSession ? "not-allowed" : "pointer",
+                  cursor: (!sessionLoaded || activeSession) ? "not-allowed" : "pointer",
                   fontWeight: 700,
                   fontSize: 15,
-                  opacity: activeSession ? 0.6 : 1
+                  opacity: (!sessionLoaded || activeSession) ? 0.6 : 1
                 }}
               >
-                Start Audit
+                {!sessionLoaded ? "Loading..." : activeSession ? "Audit Active" : "Start Audit"}
               </button>
               <button
                 onClick={handleEndAuditClick}
@@ -1279,24 +1392,40 @@ function AuditDetails() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
-  const getScannerNumber = (barcode) => {
-    if (!barcode) return null;
-    const char = barcode.charAt(0).toUpperCase();
-    if (char >= 'A' && char <= 'Z') return char.charCodeAt(0) - 64;
-    return null;
+  const getScannerNumber = (item) => {
+    if (!item) return null;
+
+    // 1. Try to get scanner number from scanner field (e.g. "1", "Scanner 2", etc.)
+    if (item.scanner) {
+      const match = String(item.scanner).match(/\d+/);
+      if (match) {
+        return parseInt(match[0]);
+      }
+    }
+
+    // 2. Fallback to check prefix character in barcode for backwards compatibility
+    if (item.barcode) {
+      const char = item.barcode.charAt(0).toUpperCase();
+      if (char >= 'A' && char <= 'Z') {
+        return char.charCodeAt(0) - 64;
+      }
+    }
+
+    // 3. Fallback for manual or unspecified scans (default to Scanner 1)
+    return 1;
   };
 
   const detectedNums = Array.from(
     new Set(
       scans
-        .map(item => getScannerNumber(item.barcode))
+        .map(item => getScannerNumber(item))
         .filter(n => n !== null)
     )
   );
   const maxScannerNum = Math.max(2, ...detectedNums);
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
   const scansByScanner = scannersToShow.map(num =>
-    scans.filter(item => getScannerNumber(item.barcode) === num)
+    scans.filter(item => getScannerNumber(item) === num)
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
 
@@ -1427,6 +1556,8 @@ function ProductManagement() {
   const importProductsRef = useRef(null);
   const importSalesRef = useRef(null);
   const receivedStockRef = useRef(null);
+  const testerDamageRef = useRef(null);
+  const shrinkageRef = useRef(null);
 
   const handleImportProducts = async (e) => {
     const file = e.target.files?.[0];
@@ -1482,6 +1613,88 @@ function ProductManagement() {
         await fetchProducts();
       } else {
         alert(resData.error || "Failed to import sales.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error reading/importing Excel file: " + err.message);
+    } finally {
+      setLoading(false);
+      e.target.value = ""; // Reset file input
+    }
+  };
+
+  const handleImportTesterDamage = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setLoading(true);
+      const parsedRows = await parseExcelFile(file, "testerDamage");
+
+      const response = await fetch(`${API_BASE_URL}/tester-damage/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ testerDamage: parsedRows })
+      });
+
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const resData = await response.json();
+        if (response.ok) {
+          let alertMsg = resData.message || "Tester/Damage records imported successfully!";
+          if (resData.warnings && resData.warnings.length > 0) {
+            alertMsg += "\n\nWarnings:\n" + resData.warnings.join("\n");
+          }
+          alert(alertMsg);
+          await fetchProducts();
+        } else {
+          alert(resData.error || "Failed to import Tester/Damage records.");
+        }
+      } else {
+        const rawText = await response.text();
+        console.error("Non-JSON Server response:", rawText);
+        alert(`Server error (${response.status}): Please make sure the backend server is running and updated.`);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error reading/importing Excel file: " + err.message);
+    } finally {
+      setLoading(false);
+      e.target.value = ""; // Reset file input
+    }
+  };
+
+  const handleImportShrinkage = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setLoading(true);
+      const parsedRows = await parseExcelFile(file, "shrinkage");
+
+      const response = await fetch(`${API_BASE_URL}/shrinkage/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shrinkage: parsedRows })
+      });
+
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const resData = await response.json();
+        if (response.ok) {
+          let alertMsg = resData.message || "Shrinkage records imported successfully!";
+          if (resData.warnings && resData.warnings.length > 0) {
+            alertMsg += "\n\nWarnings:\n" + resData.warnings.join("\n");
+          }
+          alert(alertMsg);
+          await fetchProducts();
+        } else {
+          alert(resData.error || "Failed to import shrinkage records.");
+        }
+      } else {
+        const rawText = await response.text();
+        console.error("Non-JSON Server response:", rawText);
+        alert(`Server error (${response.status}): Please make sure the backend server is running and updated.`);
       }
     } catch (err) {
       console.error(err);
@@ -1645,6 +1858,10 @@ function ProductManagement() {
     }
   };
 
+  const overallProductQty = products.length;
+  const totalProductQty = products.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
+  const totalAmount = products.reduce((acc, p) => acc + ((Number(p.mrp) || 0) * (Number(p.physicalQuantity) || 0)), 0);
+
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
       <Header />
@@ -1711,6 +1928,38 @@ function ProductManagement() {
             disabled={loading}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Received Stock</span>
+          </button>
+
+          <input
+            type="file"
+            accept=".xlsx, .xls"
+            style={{ display: "none" }}
+            ref={testerDamageRef}
+            onChange={handleImportTesterDamage}
+          />
+          <button
+            className="btn"
+            style={{ background: "#e11d48", color: "#fff" }}
+            onClick={() => testerDamageRef.current.click()}
+            disabled={loading}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Tester/ Damage</span>
+          </button>
+
+          <input
+            type="file"
+            accept=".xlsx, .xls"
+            style={{ display: "none" }}
+            ref={shrinkageRef}
+            onChange={handleImportShrinkage}
+          />
+          <button
+            className="btn"
+            style={{ background: "#475569", color: "#fff" }}
+            onClick={() => shrinkageRef.current.click()}
+            disabled={loading}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Shrinkage</span>
           </button>
 
           <button
@@ -1789,7 +2038,7 @@ function ProductManagement() {
         )}
 
         <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
             <h2 style={{ margin: 0, color: "#1a1a2e" }}>All Products</h2>
             <div style={{ width: '400px' }}>
               <Select
@@ -1804,6 +2053,70 @@ function ProductManagement() {
               />
             </div>
           </div>
+
+          {/* Summary Cards */}
+          <div style={{ display: "flex", gap: "10px", marginBottom: "20px", flexWrap: "wrap" }}>
+            {/* Card 1: Overall Product Quantity */}
+            <div style={{
+              background: "linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)",
+              border: "1px solid #bfdbfe",
+              borderRadius: "8px",
+              padding: "10px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+              transition: "transform 0.15s ease",
+              cursor: "default"
+            }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+              onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            >
+              <span style={{ fontSize: "14px", color: "#1e3a8a", fontWeight: 600 }}>Overall Product Quantity:</span>
+              <span style={{ fontSize: "15px", fontWeight: 800, color: "#1e3a8a" }}>{overallProductQty}</span>
+            </div>
+
+            {/* Card 2: Total Product Quantity */}
+            <div style={{
+              background: "linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)",
+              border: "1px solid #bbf7d0",
+              borderRadius: "8px",
+              padding: "10px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+              transition: "transform 0.15s ease",
+              cursor: "default"
+            }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+              onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            >
+              <span style={{ fontSize: "14px", color: "#14532d", fontWeight: 600 }}>Total Product Quantity:</span>
+              <span style={{ fontSize: "15px", fontWeight: 800, color: "#14532d" }}>{totalProductQty}</span>
+            </div>
+
+            {/* Card 3: Total Amount */}
+            <div style={{
+              background: "linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)",
+              border: "1px solid #e9d5ff",
+              borderRadius: "8px",
+              padding: "10px 16px",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+              transition: "transform 0.15s ease",
+              cursor: "default"
+            }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+              onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            >
+              <span style={{ fontSize: "14px", color: "#581c87", fontWeight: 600 }}>Total Amount:</span>
+              <span style={{ fontSize: "15px", fontWeight: 800, color: "#581c87" }}>₹{totalAmount.toLocaleString('en-IN')}</span>
+            </div>
+          </div>
+
           {loading ? (
             <p>Loading products...</p>
           ) : products.length === 0 ? (
@@ -1815,7 +2128,7 @@ function ProductManagement() {
                   <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Barcode</th>
                   <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Product Name</th>
                   <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
-                  <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Physical Qty</th>
+                  <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>System Quantity</th>
                   <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Actions</th>
                 </tr>
               </thead>
@@ -1899,7 +2212,7 @@ function AuditScanning() {
 
   useEffect(() => {
     if (compareAuditId) return; // Do not connect WS if we are just comparing an old session
-    const ws = new WebSocket("ws://16.16.123.89:8080");
+    const ws = new WebSocket("ws://127.0.0.1:8080");
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -2033,8 +2346,8 @@ function AuditScanning() {
                     </th>
                     <th style={{ padding: "10px 12px" }}>Product Name</th>
                     <th style={{ padding: "10px 12px" }}>Barcode</th>
-                    <th style={{ padding: "10px 12px", textAlign: "center" }}>Expected (Phy)</th>
-                    <th style={{ padding: "10px 12px", textAlign: "center" }}>Scanned (Sys)</th>
+                    <th style={{ padding: "10px 12px", textAlign: "center" }}>System Quantity</th>
+                    <th style={{ padding: "10px 12px", textAlign: "center" }}>Physical Quantity</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2137,8 +2450,8 @@ function ReconciliationReport() {
 
     // 2. Define headers and add them to the sheet
     const headers = [
-      "Barcode", "Product Name", "Physical Qty", "MRP",
-      "Physical Amt", "System Qty", "System Amt", "Diff Qty", "Diff Amt"
+      "Barcode", "Product Name", "System Quantity", "MRP",
+      "Total Amount (Sys Qty)", "Physical Quantity", "Total Amount (Phy Qty)", "Diff Qty", "Diff Amt"
     ];
     sheet.addRow(headers);
 
@@ -2220,11 +2533,11 @@ function ReconciliationReport() {
               <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #ddd" }}>
                 <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Barcode</th>
                 <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Product Name</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Phy Qty</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>System Quantity</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Physical Amt</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Sys Qty</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>System Amt</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Total Amount (Sys Qty)</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Physical Quantity</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Total Amount (Phy Qty)</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diff !== 0) ? "#c62828" : "#2e7d32" }}>Diff</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diffAmt !== 0) ? "#c62828" : "#2e7d32" }}>Diff Amt</th>
               </tr>
@@ -2266,19 +2579,19 @@ function ReconciliationReport() {
           <h2 style={{ margin: "0 0 16px", color: "#1a1a2e" }}>Summary</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
             <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Physical Qty</div>
+              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total System Quantity</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>{summary.totalPhyQty}</div>
             </div>
             <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Physical Amount</div>
+              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Amount (Sys Qty)</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>₹{summary.totalPhyAmt.toLocaleString()}</div>
             </div>
             <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total System Qty</div>
+              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Physical Quantity</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#6a1b9a" }}>{summary.totalSysQty}</div>
             </div>
             <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total System Amount</div>
+              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Amount (Phy Qty)</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#6a1b9a" }}>₹{summary.totalSysAmt.toLocaleString()}</div>
             </div>
             <div style={{ background: summary.totalDiffQty === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8 }}>
@@ -2299,8 +2612,11 @@ function ReconciliationReport() {
 // --- ACTIVITY LOGS COMPONENT ---
 function ActivityLogs() {
   const [sessions, setSessions] = useState([]);
+  const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedSessions, setExpandedSessions] = useState({});
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
 
   useEffect(() => {
     fetchSessions();
@@ -2311,8 +2627,12 @@ function ActivityLogs() {
       const response = await fetch(`${API_BASE_URL}/import-sessions`);
       const data = await response.json();
       setSessions(Array.isArray(data) ? data : []);
+
+      const prodRes = await fetch(`${API_BASE_URL}/products`);
+      const prodData = await prodRes.json();
+      setProducts(Array.isArray(prodData) ? prodData : []);
     } catch (err) {
-      console.error("Error fetching import sessions:", err);
+      console.error("Error fetching data in ActivityLogs:", err);
     } finally {
       setLoading(false);
     }
@@ -2327,6 +2647,9 @@ function ActivityLogs() {
       "Sales Import": { bg: "#fee2e2", color: "#991b1b" },
       "Received Stock Import": { bg: "#dbeafe", color: "#1e40af" },
       "Product Import": { bg: "#dcfce7", color: "#166534" },
+      "Manual Entry": { bg: "#fef3c7", color: "#92400e" },
+      "Tester/ Damage": { bg: "#ffe4e6", color: "#9f1239" },
+      "Shrinkage": { bg: "#f1f5f9", color: "#334155" }
     };
     const s = styles[importType] || { bg: "#e0e7ff", color: "#3730a3" };
     return (
@@ -2390,6 +2713,186 @@ function ActivityLogs() {
     }
   };
 
+  const handleDownloadMonthlyReport = async () => {
+    try {
+      setLoading(true);
+      const workbook = new ExcelJS.Workbook();
+
+      // 1. Summary Sheet
+      const summarySheet = workbook.addWorksheet("Monthly Summary");
+      summarySheet.views = [{ showGridLines: true }];
+      
+      const titleCell = summarySheet.getCell("A1");
+      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      titleCell.value = `Monthly Inventory Report - ${monthNames[selectedMonth]} ${selectedYear}`;
+      titleCell.font = { name: "Arial", size: 16, bold: true, color: { argb: "FF1E3A8A" } };
+      summarySheet.mergeCells("A1:C1");
+
+      summarySheet.addRow([]); // empty row
+
+      const headerRow = summarySheet.addRow(["Metric Name", "Quantity / Count", "Respected Amount (₹)"]);
+      headerRow.eachCell(cell => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2E7D32" } };
+        cell.alignment = { horizontal: "center" };
+      });
+
+      summarySheet.addRow(["Overall Product Count", overallProductCount, "N/A"]);
+      summarySheet.addRow(["Total Product Quantity", overallProductQty, overallProductAmt]);
+      summarySheet.addRow(["Total Out Product Qty", totalSales, totalSalesAmt]);
+      summarySheet.addRow(["Total Available Product Quantity", totalSystemQty, totalSystemAmt]);
+
+      // Format Summary numbers
+      for (let i = 4; i <= 7; i++) {
+        const row = summarySheet.getRow(i);
+        row.getCell(2).alignment = { horizontal: "right" };
+        if (i > 4) {
+          row.getCell(3).numFmt = "₹#,##0.00";
+          row.getCell(3).alignment = { horizontal: "right" };
+        } else {
+          row.getCell(3).alignment = { horizontal: "center" };
+        }
+      }
+      summarySheet.columns = [{ width: 35 }, { width: 20 }, { width: 25 }];
+
+      // Helper to add consolidated activity sheet
+      const addConsolidatedActivitySheet = (sheetName, importType, hasAction = false) => {
+        const sheet = workbook.addWorksheet(sheetName);
+        sheet.views = [{ showGridLines: true }];
+
+        const headers = ["Barcode", "Product Name", "MRP (₹)", "Total Quantity", "Latest Transaction Date"];
+        if (hasAction) headers.push("Actions Logged");
+
+        const headerRow = sheet.addRow(headers);
+        headerRow.eachCell(cell => {
+          cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E3A8A" } };
+          cell.alignment = { horizontal: "center", vertical: "middle" };
+        });
+
+        // Filter sessions of this type
+        const sessionsOfType = currentMonthSessions.filter(s => s.importType === importType);
+        
+        // Group products by barcode (or productName if barcode is empty) to avoid duplicates
+        const grouped = {};
+        sessionsOfType.forEach(session => {
+          const sessionDate = new Date(session.timestamp);
+          session.products.forEach(p => {
+            const barcodeKey = String(p.barcode || "").trim();
+            const nameKey = String(p.productName || "").trim();
+            const key = (barcodeKey || nameKey || "unknown").toLowerCase();
+            
+            if (!grouped[key]) {
+              grouped[key] = {
+                barcode: barcodeKey,
+                productName: nameKey,
+                mrp: Number(p.mrp) || 0,
+                quantity: 0,
+                latestDate: sessionDate,
+                actions: new Set()
+              };
+            } else {
+              if (sessionDate > grouped[key].latestDate) {
+                grouped[key].latestDate = sessionDate;
+              }
+            }
+            
+            grouped[key].quantity += Number(p.quantity) || 0;
+            if (p.action) {
+              grouped[key].actions.add(p.action);
+            } else {
+              grouped[key].actions.add(importType);
+            }
+          });
+        });
+
+        // Add consolidated rows to sheet
+        Object.values(grouped).forEach(item => {
+          const rowData = [
+            item.barcode,
+            item.productName,
+            item.mrp,
+            item.quantity,
+            item.latestDate.toLocaleString()
+          ];
+          if (hasAction) {
+            rowData.push(Array.from(item.actions).join(", "));
+          }
+          
+          const addedRow = sheet.addRow(rowData);
+          addedRow.getCell(3).numFmt = "₹#,##0.00";
+          addedRow.getCell(3).alignment = { horizontal: "right" };
+          addedRow.getCell(4).alignment = { horizontal: "right" };
+          addedRow.getCell(5).alignment = { horizontal: "center" };
+        });
+
+        sheet.columns = [
+          { width: 20 }, { width: 30 }, { width: 14 }, { width: 16 }, { width: 24 }, { width: 30 }
+        ];
+      };
+
+      // 2. Product Imports Sheet (Consolidated)
+      addConsolidatedActivitySheet("Product Imports", "Product Import", true);
+
+      // 3. Sales Imports Sheet (Consolidated)
+      addConsolidatedActivitySheet("Sales Imports", "Sales Import");
+
+      // 4. Received Stock Sheet (Consolidated)
+      addConsolidatedActivitySheet("Received Stock", "Received Stock Import");
+
+      // 5. Tester & Damage Sheet (Consolidated)
+      addConsolidatedActivitySheet("Tester & Damage", "Tester/ Damage");
+
+      // 6. Shrinkage Sheet (Consolidated)
+      addConsolidatedActivitySheet("Shrinkage", "Shrinkage");
+
+      // 7. Manual Entries Sheet (Consolidated)
+      addConsolidatedActivitySheet("Manual Entries", "Manual Entry", true);
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const formattedMonth = String(selectedMonth + 1).padStart(2, "0");
+      a.download = `Monthly_Inventory_Report_${selectedYear}_${formattedMonth}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to download monthly report: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const overallProductCount = products.length;
+  
+  // Filter log sessions to the selected calendar month dynamically
+  const currentMonthSessions = sessions.filter(session => {
+    const d = new Date(session.timestamp);
+    return d.getFullYear() === selectedYear && d.getMonth() === selectedMonth;
+  });
+
+  let totalSales = 0;
+  let totalSalesAmt = 0;
+  currentMonthSessions.forEach(session => {
+    if (session.importType === "Sales Import" || session.importType === "Tester/ Damage" || session.importType === "Shrinkage") {
+      session.products.forEach(p => {
+        const qty = Number(p.quantity) || 0;
+        const mrp = Number(p.mrp) || 0;
+        totalSales += qty;
+        totalSalesAmt += qty * mrp;
+      });
+    }
+  });
+
+  const totalSystemQty = products.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
+  const totalSystemAmt = products.reduce((acc, p) => acc + ((Number(p.physicalQuantity) || 0) * (Number(p.mrp) || 0)), 0);
+
+  const overallProductQty = totalSystemQty + totalSales;
+  const overallProductAmt = totalSystemAmt + totalSalesAmt;
+
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
       <Header />
@@ -2400,6 +2903,223 @@ function ActivityLogs() {
               <span style={{ display: "flex", alignItems: "center", gap: "10px" }}><ClipboardIcon size={28} /> Activity Logs</span>
             </h1>
             <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Import history — expand any row to view product-level details.</p>
+          </div>
+
+          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            {/* Month Select */}
+            <select
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(Number(e.target.value))}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #cbd5e1",
+                background: "#fff",
+                fontSize: "14px",
+                color: "#334155",
+                cursor: "pointer",
+                outline: "none"
+              }}
+            >
+              {["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((m, idx) => (
+                <option key={idx} value={idx}>{m}</option>
+              ))}
+            </select>
+
+            {/* Year Select */}
+            <select
+              value={selectedYear}
+              onChange={(e) => setSelectedYear(Number(e.target.value))}
+              style={{
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid #cbd5e1",
+                background: "#fff",
+                fontSize: "14px",
+                color: "#334155",
+                cursor: "pointer",
+                outline: "none"
+              }}
+            >
+              {[2024, 2025, 2026, 2027, 2028, 2029, 2030].map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
+
+            {/* Download Report Button */}
+            <button
+              className="btn btn-primary"
+              onClick={handleDownloadMonthlyReport}
+              disabled={loading}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "8px 16px",
+                fontSize: "14px",
+                background: "#1e3a8a",
+                borderColor: "#1e3a8a"
+              }}
+            >
+              <DownloadIcon size={16} /> Download Monthly Report
+            </button>
+          </div>
+        </div>
+
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, max-content)",
+          gap: "12px",
+          marginBottom: "20px"
+        }}>
+          {/* Card 1: Overall Product Count */}
+          <div style={{
+            background: "linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)",
+            border: "1px solid #bfdbfe",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#1e3a8a", fontWeight: 500 }}>
+              Overall Product Count: <strong style={{ fontWeight: 700 }}>{overallProductCount}</strong>
+            </span>
+          </div>
+
+          {/* Card 2: Total Product Quantity */}
+          <div style={{
+            background: "linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)",
+            border: "1px solid #bbf7d0",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
+              Total Product Quantity: <strong style={{ fontWeight: 700 }}>{overallProductQty}</strong>
+            </span>
+          </div>
+
+          {/* Card 4: Total Out Product Qty */}
+          <div style={{
+            background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
+            border: "1px solid #fed7aa",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#c2410c", fontWeight: 500 }}>
+              Total Out Product Qty: <strong style={{ fontWeight: 700 }}>{totalSales}</strong>
+            </span>
+          </div>
+
+          {/* Card 6: Total Available Product Quantity */}
+          <div style={{
+            background: "linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)",
+            border: "1px solid #e9d5ff",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#581c87", fontWeight: 500 }}>
+              Total Available Product Quantity: <strong style={{ fontWeight: 700 }}>{totalSystemQty}</strong>
+            </span>
+          </div>
+
+          {/* Row 2 Col 1 Spacer */}
+          <div></div>
+
+          {/* Card 3: Total Product Amount */}
+          <div style={{
+            background: "linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)",
+            border: "1px solid #bbf7d0",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
+              Total Product Amount: <strong style={{ fontWeight: 700 }}>₹{overallProductAmt.toLocaleString()}</strong>
+            </span>
+          </div>
+
+          {/* Card 5: Total Out Product Amount */}
+          <div style={{
+            background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
+            border: "1px solid #fed7aa",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#c2410c", fontWeight: 500 }}>
+              Total Out Product Amount: <strong style={{ fontWeight: 700 }}>₹{totalSalesAmt.toLocaleString()}</strong>
+            </span>
+          </div>
+
+          {/* Card 7: Total Available Product Amount */}
+          <div style={{
+            background: "linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)",
+            border: "1px solid #e9d5ff",
+            borderRadius: "8px",
+            padding: "10px 16px",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 1px 2px rgba(0, 0, 0, 0.05)",
+            transition: "transform 0.15s ease",
+            cursor: "default",
+            justifyContent: "center"
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+          >
+            <span style={{ fontSize: "13px", color: "#581c87", fontWeight: 500 }}>
+              Total Available Product Amount: <strong style={{ fontWeight: 700 }}>₹{totalSystemAmt.toLocaleString()}</strong>
+            </span>
           </div>
         </div>
 
@@ -2575,7 +3295,7 @@ function LicenseWrapper({ children }) {
         <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '24px' }}>Please enter your license key to continue.</p>
         {errorMsg && <div style={{ background: '#fee2e2', color: '#b91c1c', padding: '10px', borderRadius: '6px', marginBottom: '16px', fontSize: '14px' }}>{errorMsg}</div>}
         <form onSubmit={handleActivate}>
-          <input type="text" placeholder="XXXX-XXXX-XXXX-XXXX" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} required style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '16px', fontSize: '16px', boxSizing: 'border-box', fontFamily: 'monospace' }} />
+          <input id="licenseKey" name="licenseKey" type="text" placeholder="XXXX-XXXX-XXXX-XXXX" value={keyInput} onChange={(e) => setKeyInput(e.target.value)} required style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '16px', fontSize: '16px', boxSizing: 'border-box', fontFamily: 'monospace' }} />
           <button type="submit" disabled={activating} style={{ width: '100%', padding: '12px', background: '#2e7d32', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: activating ? 'not-allowed' : 'pointer', fontSize: '16px' }}>
             {activating ? 'Verifying...' : 'Activate License'}
           </button>
@@ -2620,5 +3340,6 @@ function App() {
     </LicenseWrapper>
   );
 }
+
 
 export default App;

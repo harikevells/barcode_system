@@ -13,7 +13,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-WEB_API_URL ="http://16.16.123.89/api/barcode"
+WEB_API_URL ="http://192.168.0.141:5001/api/barcode"
 
 
 # ---------------- SCANNER WORKER ----------------
@@ -54,43 +54,61 @@ class ScannerWorker(threading.Thread):
                             if k.startswith("KEY_"):
                                 char = k.replace("KEY_", "")
 
-                                # handle number keys only (safe for barcode)
-                                if char.startswith("NUM"):
+                                # Handle numpad keys
+                                if char.startswith("NUM_"):
                                     char = char.replace("NUM_", "")
 
-                                if char.isdigit():
-                                    barcode += char
+                                # Accept ALL printable characters: digits AND letters
+                                # Single character = letter or digit key (e.g. KEY_A -> A, KEY_1 -> 1)
+                                if len(char) == 1:
+                                    barcode += char.lower()
 
         except Exception as e:
             logger.error(f"[Scanner {self.scanner_id}] Error: {e}")
+            print(f"❌ [Scanner {self.scanner_id}] Read error: {e}")
 
     def process_barcode(self, barcode):
-        # add scanner-specific prefix dynamically (1->a, 2->b, 3->c, 4->d, etc.)
-        if 1 <= self.scanner_id <= 26:
-            prefix = chr(ord('a') + self.scanner_id - 1)
-            barcode = f"{prefix}{barcode}"
-
         # 1. TERMINAL OUTPUT
         print(f"🟢 Scanner {self.scanner_id} -> {barcode}")
 
-        # 2. DATABASE SAVE (NO FILTERING)
+        # 2. WEB TRANSMISSION FIRST
+        save_to_local = True
         try:
-            self.database.insert_scan(self.scanner_id, barcode)
-        except Exception as e:
-            logger.error(f"DB error: {e}")
-
-        # 3. WEB TRANSMISSION
-        try:
-            requests.post(
+            response = requests.post(
                 WEB_API_URL,
                 json={
-                    "scanner_id": self.scanner_id,
+                    "scanner": str(self.scanner_id),
                     "barcode": barcode
                 },
                 timeout=2
             )
+            
+            # Check if backend explicitly rejected because there is no active audit
+            if response.status_code != 200:
+                try:
+                    res_data = response.json()
+                    if res_data.get("error") == "NO_ACTIVE_AUDIT":
+                        save_to_local = False
+                        print(f"⏩ Scan ignored (no active audit session on server): {barcode}")
+                    else:
+                        print(f"⚠️ Server rejected scan: {response.status_code} {response.text[:80]}")
+                except Exception:
+                    print(f"⚠️ Server returned error: {response.status_code}")
+            else:
+                print(f"📡 Sent to server: {barcode} | Response: {response.status_code} {response.text[:80]}")
+                
         except Exception as e:
-            logger.error(f"Web API error: {e}")
+            logger.error(f"Web API error (offline mode): {e}")
+            print(f"❌ Web API error (cannot reach {WEB_API_URL}): {e}. Saving locally.")
+
+        # 3. DATABASE SAVE (ONLY IF NOT EXPLICITLY REJECTED BY SERVER)
+        if save_to_local:
+            try:
+                self.database.insert_scan(self.scanner_id, barcode)
+                print(f"💾 Saved to local database: {barcode}")
+            except Exception as e:
+                logger.error(f"DB error: {e}")
+                print(f"❌ DB error: {e}")
 
 
 # ---------------- SCANNER MANAGER ----------------

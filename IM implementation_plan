@@ -1,0 +1,101 @@
+# Implementation Plan: Systemd Auto-Restart Service, Log Rotation & Audit Control
+
+Implement an auto-restarting `systemd` service for the Raspberry Pi, change the log configuration on the Pi to use a 5MB rotating file handler, and restrict barcode scanning so barcodes are only received/saved when an active audit session is running in the frontend.
+
+## Proposed Changes
+
+### 1. Raspberry Pi Configuration (Python client)
+
+#### [MODIFY] [main.py](file:///d:/barcode_system/BC/main.py)
+- Replace `logging.FileHandler` with `logging.handlers.RotatingFileHandler`.
+- Configure `maxBytes=5*1024*1024` (5MB) and `backupCount=5` to prevent log storage issues on the Pi.
+
+#### [MODIFY] [scanner.py](file:///d:/barcode_system/BC/scanner.py)
+- Update `process_barcode` to perform Web API transmission *before* local SQLite database insertion.
+- Parse the response from the server: if the server rejects the scan with a `NO_ACTIVE_AUDIT` status code/error, discard the scan and do *not* write it to the local SQLite database.
+- If the server is unreachable (offline mode), fall back to saving the scan locally so it can be synced later.
+
+#### [NEW] [scanner.service](file:///d:/barcode_system/BC/scanner.service)
+Create the systemd service file to run the python scanner on startup with auto-restart:
+- Runs `main.py` under the `pi` user context.
+- Configures auto-restart behavior with a 5-second delay.
+- Restart policy set to `always`.
+
+---
+
+### 2. Backend Server Configuration (Node/Express)
+
+#### [MODIFY] [serialServer.js](file:///d:/barcode_system/server/serialServer.js)
+- Update `/api/barcode` (Raspberry Pi endpoint): Query MongoDB for an active audit session (`AuditSession.findOne({ status: "active" })`). If no active session exists, reject the scan with a `400` status and `{ error: "NO_ACTIVE_AUDIT", message: "..." }`.
+- Update `/api/scan` (Frontend manually entered scan endpoint): Query for an active session. If none exists, reject with `400` and `NO_ACTIVE_AUDIT`.
+- Update the SerialPort data input handler to check if an active audit session exists before broadcasting scan events.
+
+---
+
+## Detailed Flow Analysis with Audit Control
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant React as React Frontend
+    participant Server as Express Backend (Port 5001)
+    participant Pi as Raspberry Pi (Python)
+    participant DB as MongoDB / SQLite
+
+    User->>React: Click "Start Audit"
+    React->>Server: POST /api/audit-sessions
+    Server->>DB: Create session with status "active"
+    Server-->>React: Session active confirmation
+
+    Note over User, Pi: Scenario A: Scan occurs during active audit
+    User->>Pi: Scan barcode
+    Pi->>Server: POST /api/barcode (with barcode)
+    Server->>DB: Check if active session exists
+    Note over Server: Active session exists
+    Server->>DB: Save scan to BCScan (MongoDB)
+    Server->>React: Broadcast live scan via WebSocket (Port 8080)
+    Server-->>Pi: 200 OK (Scan Saved)
+    Pi->>DB: Write scan to local SQLite (for sync integrity)
+
+    Note over User, Pi: Scenario B: Scan occurs when no audit is active
+    User->>Pi: Scan barcode
+    Pi->>Server: POST /api/barcode (with barcode)
+    Server->>DB: Check if active session exists
+    Note over Server: No active session exists
+    Server-->>Pi: 400 Bad Request {error: "NO_ACTIVE_AUDIT"}
+    Pi->>Pi: Skip writing to local SQLite database (Discard scan)
+```
+
+---
+
+## Deployment Instructions
+
+To deploy the changes:
+1. Update `main.py`, `scanner.py`, and `serialServer.js`.
+2. Copy `scanner.service` to `/etc/systemd/system/scanner.service` on the Pi.
+3. Reload, enable, and start the systemd service on the Pi:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable scanner.service
+   sudo systemctl restart scanner.service
+   ```
+
+---
+
+## Verification Plan
+
+### Automated Tests
+- Verify systemd status: `systemctl status scanner.service`
+- Verify log rotation: Check `/home/pi/BC/logs/` after generating log volume.
+
+### Manual Verification
+1. **No Active Session**:
+   - Open frontend without starting an audit.
+   - Scan a barcode. Verify that the terminal on the Pi prints "Scan ignored", local SQLite is NOT updated, and MongoDB does NOT receive the barcode.
+2. **Active Session**:
+   - Click "Start Audit" in the frontend.
+   - Scan a barcode. Verify that it is written to local SQLite, sent to MongoDB, and broadcasted to the frontend live.
+3. **Offline Fallback**:
+   - Terminate the backend server.
+   - Scan a barcode. Verify that the Pi prints "Web API error (offline mode)" and writes the scan to local SQLite.

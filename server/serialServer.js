@@ -15,11 +15,11 @@ const recentScans = new Map();
 function isDuplicateScan(barcode) {
   const now = Date.now();
   const lastScan = recentScans.get(barcode);
-  if (lastScan && (now - lastScan) < 500) {
-    return true; // Ignore if scanned within 500ms (hardware bounce)
+  if (lastScan && (now - lastScan) < 200) {
+    return true; // Ignore only within 200ms (hardware bounce protection)
   }
   recentScans.set(barcode, now);
-  
+
   // Cleanup old entries to prevent memory leak
   if (recentScans.size > 1000) {
     const cutoff = now - 5000;
@@ -116,6 +116,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Global Cache-Control Prevention Middleware
+app.use((req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  next();
+});
+
 const { checkCurrentLicenseStatus, validateLicenseOnline, clearMemoryCache } = require("./licenseHelper");
 
 // License Endpoints
@@ -137,7 +143,7 @@ app.use(async (req, res, next) => {
   if (req.method === 'OPTIONS' || req.path.startsWith('/api/license')) {
     return next();
   }
-  
+
   if (req.path.startsWith('/api/')) {
     const status = await checkCurrentLicenseStatus();
     if (!status.valid) {
@@ -150,6 +156,17 @@ app.use(async (req, res, next) => {
 // Add scanned product
 app.post("/api/scan", async (req, res) => {
   const { barcode } = req.body;
+
+  try {
+    const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+    if (!activeSession) {
+      console.log(`⏩ Scan ignored (no active audit session): "${barcode}"`);
+      return res.status(400).json({ error: "NO_ACTIVE_AUDIT", message: "No active audit session. Scan ignored." });
+    }
+  } catch (err) {
+    console.error("Error checking active audit session:", err);
+    return res.status(500).json({ error: "Database error checking audit status" });
+  }
 
   if (isDuplicateScan(barcode)) {
     return res.status(200).json({ message: "Ignored duplicate scan" });
@@ -204,6 +221,19 @@ app.post("/api/barcode", async (req, res) => {
   const barcode = req.body.barcode || req.body.data || Object.keys(req.body)[0];
   const scannerId = req.body.scanner || req.body.scannerId || req.body.scanner_id || "1";
 
+  console.log(`📥 /api/barcode received: barcode="${barcode}" scanner="${scannerId}" from ${req.ip}`);
+
+  try {
+    const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+    if (!activeSession) {
+      console.log(`⏩ Scan ignored (no active audit session): "${barcode}"`);
+      return res.status(400).json({ error: "NO_ACTIVE_AUDIT", message: "No active audit session. Scan ignored." });
+    }
+  } catch (err) {
+    console.error("Error checking active audit session:", err);
+    return res.status(500).json({ error: "Database error checking audit status" });
+  }
+
   if (!isNaN(scannerId)) {
     const sNum = parseInt(scannerId);
     if (sNum > activeScannersCount) {
@@ -213,6 +243,7 @@ app.post("/api/barcode", async (req, res) => {
   }
 
   if (isDuplicateScan(barcode)) {
+    console.log(`⏩ Duplicate scan ignored: "${barcode}"`);
     return res.status(200).json({ message: "Ignored duplicate scan" });
   }
 
@@ -235,6 +266,7 @@ app.post("/api/barcode", async (req, res) => {
       timestamp: Date.now()
     });
 
+    console.log(`✅ Broadcasted: "${barcode}" to ${clients.size} WebSocket client(s)`);
     res.json({ success: true, message: "Saved and Broadcasted" });
   } catch (err) {
     console.error("Error in /api/barcode:", err);
@@ -409,28 +441,56 @@ app.delete("/api/clear-all", async (req, res) => {
 app.post("/api/products", async (req, res) => {
   try {
     const { barcode, productName, mrp, physicalQuantity } = req.body;
-    
-    // Find existing product to log details
-    const existingProduct = await Product.findOne({ barcode });
-    const isNew = !existingProduct;
-    const previousQty = existingProduct ? existingProduct.physicalQuantity : "N/A";
-    
-    const product = await Product.findOneAndUpdate(
-      { barcode },
-      {
-        barcode,
+    const cleanBarcode = barcode ? String(barcode).trim() : "";
+    const cleanName = productName ? String(productName).trim() : "";
+
+    // Search by barcode first (case-insensitive), fallback to product name (case-insensitive)
+    let product = null;
+    if (cleanBarcode) {
+      product = await Product.findOne({ barcode: new RegExp("^" + cleanBarcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+    }
+    if (!product && cleanName) {
+      product = await Product.findOne({ productName: new RegExp("^" + cleanName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+    }
+
+    const isNew = !product;
+    const previousQty = product ? product.physicalQuantity : 0;
+
+    if (product) {
+      // Update existing product
+      product.productName = productName;
+      if (cleanBarcode) product.barcode = cleanBarcode;
+      product.mrp = mrp;
+      product.physicalQuantity = physicalQuantity;
+      product.updatedAt = new Date();
+      await product.save();
+    } else {
+      // Create new product
+      product = new Product({
+        barcode: cleanBarcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase(),
         productName,
         mrp,
-        physicalQuantity,
-        updatedAt: new Date()
-      },
-      { upsert: true, returnDocument: 'after' }
-    );
-    
+        physicalQuantity
+      });
+      await product.save();
+    }
+
     // Log the manual update/creation
     const action = isNew ? "PRODUCT_CREATE" : "PRODUCT_UPDATE";
-    await logActivity(action, productName, previousQty, physicalQuantity, "Manual Update", barcode);
-    
+    const sessionId = "MANUAL_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    await logActivity(
+      action,
+      productName,
+      previousQty,
+      physicalQuantity,
+      isNew ? "Manual Create" : "Manual Update",
+      product.barcode,
+      isNew ? `Created manually with Qty: ${physicalQuantity}` : `Updated manually: Qty ${previousQty} → ${physicalQuantity}`,
+      sessionId,
+      mrp,
+      physicalQuantity
+    );
+
     res.json({ message: "Product saved", product });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -468,12 +528,12 @@ app.delete("/api/products/:id", async (req, res) => {
     if (!product) {
       return res.status(404).json({ error: "Product not found" });
     }
-    
+
     await Product.findByIdAndDelete(req.params.id);
-    
+
     // Log the deletion
     await logActivity("PRODUCT_DELETE", product.productName, product.physicalQuantity, "Deleted", "Deletion", product.barcode);
-    
+
     res.json({ message: "Product deleted successfully" });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -494,7 +554,7 @@ app.get("/api/logs", async (req, res) => {
 app.get("/api/import-sessions", async (req, res) => {
   try {
     // Fetch ALL logs matching these actions
-    const importActions = ["PRODUCT_IMPORT_UPDATE", "PRODUCT_IMPORT_CREATE", "SALES_IMPORT", "STOCK_RECEIVED_UPDATE", "STOCK_RECEIVED_CREATE"];
+    const importActions = ["PRODUCT_IMPORT_UPDATE", "PRODUCT_IMPORT_CREATE", "SALES_IMPORT", "STOCK_RECEIVED_UPDATE", "STOCK_RECEIVED_CREATE", "PRODUCT_CREATE", "PRODUCT_UPDATE", "TESTER_DAMAGE_IMPORT", "SHRINKAGE_IMPORT"];
     const logs = await ActivityLog.find({
       action: { $in: importActions }
     }).sort({ timestamp: -1 });
@@ -505,13 +565,16 @@ app.get("/api/import-sessions", async (req, res) => {
     for (const log of logs) {
       const sid = log.importSessionId;
       const logType = log.action.startsWith("SALES") ? "Sales Import" :
-                      log.action.startsWith("STOCK") ? "Received Stock Import" : "Product Import";
+        log.action.startsWith("STOCK") ? "Received Stock Import" :
+        log.action === "TESTER_DAMAGE_IMPORT" ? "Tester/ Damage" :
+        log.action === "SHRINKAGE_IMPORT" ? "Shrinkage" :
+        (log.action === "PRODUCT_CREATE" || log.action === "PRODUCT_UPDATE") ? "Manual Entry" : "Product Import";
 
       // Parse quantity for legacy logs if not set
       let qty = log.quantity;
       if (qty === undefined || qty === null || qty === 0) {
-        if (log.action.startsWith("SALES")) {
-          const match = String(log.details || "").match(/Sold:\s*(\d+)/i);
+        if (log.action.startsWith("SALES") || log.action === "TESTER_DAMAGE_IMPORT" || log.action === "SHRINKAGE_IMPORT") {
+          const match = String(log.details || "").match(/(?:Sold|Removed|Qty):\s*(\d+)/i);
           if (match) {
             qty = parseInt(match[1]);
           } else {
@@ -544,13 +607,15 @@ app.get("/api/import-sessions", async (req, res) => {
           mrp: parsedMRP,
           quantity: qty,
           action: log.action,
-          details: log.details
+          details: log.details,
+          previousValue: log.previousValue,
+          updatedValue: log.updatedValue
         });
       } else {
         // Legacy log without session ID: group by timestamp proximity (within 5 seconds) and type
         const logTime = new Date(log.timestamp).getTime();
-        let targetSession = legacySessions.find(s => 
-          s.importType === logType && 
+        let targetSession = legacySessions.find(s =>
+          s.importType === logType &&
           Math.abs(new Date(s.timestamp).getTime() - logTime) <= 5000
         );
 
@@ -572,7 +637,9 @@ app.get("/api/import-sessions", async (req, res) => {
           mrp: parsedMRP,
           quantity: qty,
           action: log.action,
-          details: log.details
+          details: log.details,
+          previousValue: log.previousValue,
+          updatedValue: log.updatedValue
         });
       }
     }
@@ -585,7 +652,7 @@ app.get("/api/import-sessions", async (req, res) => {
 
     // Sort all sessions by timestamp descending
     allSessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    
+
     res.json(allSessions);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -606,15 +673,19 @@ app.post("/api/products/import", async (req, res) => {
       const { barcode, productName, mrp, physicalQuantity } = item;
       if (!productName) continue; // Skip rows without product name
 
-      // Search by barcode if available, else search by product name
+      // Search by barcode first (case-insensitive), fallback to product name (case-insensitive)
       let product = null;
-      if (barcode) {
-        product = await Product.findOne({ barcode });
-      } else {
-        product = await Product.findOne({ productName });
+      const cleanBarcode = barcode ? String(barcode).trim() : "";
+      const cleanName = productName ? String(productName).trim() : "";
+
+      if (cleanBarcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + cleanBarcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && cleanName) {
+        product = await Product.findOne({ productName: new RegExp("^" + cleanName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
       }
 
-      const finalBarcode = barcode || product?.barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
+      const finalBarcode = cleanBarcode || product?.barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
       const finalMRP = mrp !== undefined ? mrp : (product?.mrp || 0);
       const finalQty = physicalQuantity !== undefined ? physicalQuantity : 0;
 
@@ -622,6 +693,7 @@ app.post("/api/products/import", async (req, res) => {
         const previousQty = product.physicalQuantity;
         // Update product
         product.productName = productName;
+        product.barcode = finalBarcode;
         product.mrp = finalMRP;
         product.physicalQuantity = finalQty;
         product.updatedAt = new Date();
@@ -787,10 +859,10 @@ app.post("/api/sales/import", async (req, res) => {
 
       let product = null;
       if (barcode) {
-        product = await Product.findOne({ barcode });
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
       }
       if (!product && productName) {
-        product = await Product.findOne({ productName });
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
       }
 
       if (product) {
@@ -827,6 +899,132 @@ app.post("/api/sales/import", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in sales import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Tester/Damage
+app.post("/api/tester-damage/import", async (req, res) => {
+  try {
+    const { testerDamage } = req.body;
+    if (!Array.isArray(testerDamage)) {
+      return res.status(400).json({ error: "Invalid body. 'testerDamage' array is required." });
+    }
+
+    const sessionId = "TESTER_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of testerDamage) {
+      const { barcode, productName, quantity } = item;
+      const removeQty = parseInt(quantity) || 0;
+      if (removeQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - removeQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "TESTER_DAMAGE_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Tester/ Damage",
+          product.barcode,
+          `Removed: ${removeQty} units (Tester/Damage)`,
+          sessionId,
+          product.mrp,
+          removeQty
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} tester/damage records.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in tester/damage import:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk Import Shrinkage
+app.post("/api/shrinkage/import", async (req, res) => {
+  try {
+    const { shrinkage } = req.body;
+    if (!Array.isArray(shrinkage)) {
+      return res.status(400).json({ error: "Invalid body. 'shrinkage' array is required." });
+    }
+
+    const sessionId = "SHRINK_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
+    let processedCount = 0;
+    const warnings = [];
+
+    for (const item of shrinkage) {
+      const { barcode, productName, quantity } = item;
+      const removeQty = parseInt(quantity) || 0;
+      if (removeQty <= 0) continue; // Skip invalid quantities
+
+      let product = null;
+      if (barcode) {
+        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+      if (!product && productName) {
+        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      }
+
+      if (product) {
+        const previousQty = product.physicalQuantity || 0;
+        const newQty = Math.max(0, previousQty - removeQty);
+
+        product.physicalQuantity = newQty;
+        product.updatedAt = new Date();
+        await product.save();
+
+        await logActivity(
+          "SHRINKAGE_IMPORT",
+          product.productName,
+          previousQty,
+          newQty,
+          "Shrinkage",
+          product.barcode,
+          `Removed: ${removeQty} units (Shrinkage)`,
+          sessionId,
+          product.mrp,
+          removeQty
+        );
+        processedCount++;
+      } else {
+        const identifier = barcode || productName || "Unknown Product";
+        warnings.push(`Product '${identifier}' not found in master data.`);
+      }
+    }
+
+    res.json({
+      message: `Processed ${processedCount} shrinkage records.`,
+      count: processedCount,
+      warnings
+    });
+  } catch (err) {
+    console.error("Error in shrinkage import:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -876,20 +1074,20 @@ app.get("/api/reconciliation/report", async (req, res) => {
     let totalSysAmt = 0;
     let totalDiffQty = 0;
     let totalDiffAmt = 0;
-    
+
     const productQuery = barcodeFilter ? { barcode: { $in: barcodeFilter } } : {};
     const products = await Product.find(productQuery);
-    
+
     for (const product of products) {
       const phyQty = product.physicalQuantity || 0;
       const sysQty = scanCountMap[product.barcode] || 0;
       const mrp = product.mrp || 0;
-      
+
       const phyAmt = phyQty * mrp;
       const sysAmt = sysQty * mrp;
       const diff = sysQty - phyQty;
       const diffAmt = diff * mrp;
-      
+
       reconciliationData.push({
         barcode: product.barcode,
         productName: product.productName,
@@ -901,7 +1099,7 @@ app.get("/api/reconciliation/report", async (req, res) => {
         diff,
         diffAmt
       });
-      
+
       totalPhyQty += phyQty;
       totalPhyAmt += phyAmt;
       totalSysQty += sysQty;
@@ -909,7 +1107,7 @@ app.get("/api/reconciliation/report", async (req, res) => {
       totalDiffQty += diff;
       totalDiffAmt += diffAmt;
     }
-    
+
     // Add any unknown scanned barcodes that aren't in Product DB
     const knownBarcodes = new Set(products.map(p => p.barcode));
     for (const [barcode, sysQty] of Object.entries(scanCountMap)) {
@@ -932,7 +1130,7 @@ app.get("/api/reconciliation/report", async (req, res) => {
         totalDiffQty += sysQty;
       }
     }
-    
+
     res.json({
       data: reconciliationData,
       summary: {
@@ -1163,16 +1361,25 @@ function openPort(path) {
     }, 5000);
   });
 
-  parser.on("data", (data) => {
+  parser.on("data", async (data) => {
     const cleanData = data.toString().trim();
     if (cleanData) {
-      console.log(`📡 [${path}] Scanned: ${cleanData}`);
-      broadcast({
-        source: "serial",
-        port: path,
-        value: cleanData,
-        timestamp: Date.now()
-      });
+      try {
+        const activeSession = await mongoose.model("AuditSession").findOne({ status: "active" });
+        if (!activeSession) {
+          console.log(`📡 [${path}] Scanned: ${cleanData} (Ignored - No active audit session)`);
+          return;
+        }
+        console.log(`📡 [${path}] Scanned: ${cleanData}`);
+        broadcast({
+          source: "serial",
+          port: path,
+          value: cleanData,
+          timestamp: Date.now()
+        });
+      } catch (err) {
+        console.error("Error checking active session for serial scan:", err);
+      }
     }
   });
 
