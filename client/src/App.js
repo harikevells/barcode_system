@@ -1094,14 +1094,24 @@ function RackHistory() {
     }
   };
 
-  const handleClearHistory = () => {
+  const handleClearHistory = async () => {
     if (window.confirm("Clear all scanned barcodes in the current session?")) {
-      setSessionScans([]);
-      setActiveSession(null);
       try {
-        localStorage.removeItem("activeSession");
-        localStorage.removeItem("sessionScans");
-      } catch (e) { }
+        if (activeSession) {
+          await fetch(`${API_BASE_URL}/audit-sessions/${activeSession._id}`, {
+            method: "DELETE"
+          });
+        }
+      } catch (err) {
+        console.error("Error deleting session:", err);
+      } finally {
+        setSessionScans([]);
+        setActiveSession(null);
+        try {
+          localStorage.removeItem("activeSession");
+          localStorage.removeItem("sessionScans");
+        } catch (e) { }
+      }
     }
   };
 
