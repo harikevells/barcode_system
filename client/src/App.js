@@ -767,6 +767,14 @@ function Dashboard() {
           await fetch(`${API_BASE_URL}/clear`, { method: "DELETE" });
           setAData([]);
           setBData([]);
+          setDashboardScans([]);
+          setSessionScans([]);
+          setActiveSession(null);
+          try {
+            localStorage.removeItem("dashboardScans");
+            localStorage.removeItem("activeSession");
+            localStorage.removeItem("sessionScans");
+          } catch (e) { }
           setLastInputSource("Database and UI Cleared.");
         } catch (err) {
           console.error("Error clearing data:", err);
@@ -783,6 +791,14 @@ function Dashboard() {
           await fetch(`${API_BASE_URL}/clear-all`, { method: "DELETE" });
           setAData([]);
           setBData([]);
+          setDashboardScans([]);
+          setSessionScans([]);
+          setActiveSession(null);
+          try {
+            localStorage.removeItem("dashboardScans");
+            localStorage.removeItem("activeSession");
+            localStorage.removeItem("sessionScans");
+          } catch (e) { }
           setLastInputSource("All Databases and UI Cleared.");
         } catch (err) {
           console.error("Error clearing all data:", err);
