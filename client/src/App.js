@@ -506,7 +506,7 @@ function Header() {
   );
 }
 
-// --- EXCEL PARSER HELPER ---
+// --- EXCEL PARSER HELPER (Global) ---
 const parseExcelFile = async (file, expectedType) => {
   const workbook = new ExcelJS.Workbook();
   const arrayBuffer = await file.arrayBuffer();
@@ -560,98 +560,78 @@ const parseExcelFile = async (file, expectedType) => {
 
 // --- DASHBOARD COMPONENT ---
 function Dashboard() {
-  const [dashboardScans, setDashboardScans] = useState(() => {
-    try {
-      const saved = localStorage.getItem("dashboardScans");
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
-  const [lastInputSource, setLastInputSource] = useState("Waiting for scans...");
+  const [dashboardScans, setDashboardScans] = useState([]);
+  const [manualInputs, setManualInputs] = useState({});
   const [scannerStatuses, setScannerStatuses] = useState({});
+  const [lastInputSource, setLastInputSource] = useState("Waiting for scan...");
+  const [wsStatus, setWsStatus] = useState("Connecting...");
   const [serverScannerCount, setServerScannerCount] = useState(2);
+  const [manualScannerCount, setManualScannerCount] = useState(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
-  const [authSuccessCallback, setAuthSuccessCallback] = useState(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("dashboardScans", JSON.stringify(dashboardScans));
-    } catch (e) { }
-  }, [dashboardScans]);
-
-  useEffect(() => {
-    fetch(`${API_BASE_URL}/scanners/count`)
-      .then(res => res.json())
-      .then(data => { if (data && data.count) setServerScannerCount(data.count); })
-      .catch(() => { });
-  }, []);
-
-  const lastProcessedCodes = useRef({});
+  const [authSuccessCallback, setAuthSuccessCallback] = useState(() => () => {});
+  const [aData, setAData] = useState([]);
+  const [bData, setBData] = useState([]);
   const wsRef = useRef(null);
-  const [wsStatus, setWsStatus] = useState("Disconnected");
   const hidBuffer = useRef("");
   const hidTimer = useRef(null);
+  const lastProcessedCodes = useRef({});
+  const SCANNER_COLORS = ["#1565c0", "#2e7d32", "#ef6c00", "#7c3aed", "#d81b60", "#00897b"];
+  const maxScannerNum = manualScannerCount || serverScannerCount || 2;
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
+
+
+
+  const processScan = async (code, source = "Unknown") => {
+    const trimmedCode = String(code || "").trim();
+    if (!trimmedCode) return;
+
+    const upperCode = trimmedCode.toUpperCase();
+    if (!upperCode) return;
+
+    const hasA = upperCode.includes("A");
+    const hasB = upperCode.includes("B");
+    const aIndex = upperCode.indexOf("A");
+    const bIndex = upperCode.indexOf("B");
+
+    if ((hasA && hasB) || (hasA && aIndex > 0) || (hasB && bIndex > 0)) {
+      console.error("Concatenated scan detected:", trimmedCode);
+      alert("Overlapping/Concatenated scans detected! Please scan again.");
+      setLastInputSource(`⚠️ Blocked: Concatenated scan (${source})`);
+      return;
+    }
+
+    const firstChar = upperCode.charAt(0);
+    let colNum = 1;
+    if (firstChar >= "A" && firstChar <= "Z") {
+      colNum = firstChar.charCodeAt(0) - 64;
+    } else if (source && source.includes(":") && !isNaN(parseInt(source.split(":").pop()))) {
+      colNum = parseInt(source.split(":").pop()) || 1;
+    }
+
+    const nowTs = Date.now();
+    if (lastProcessedCodes.current[trimmedCode] && nowTs - lastProcessedCodes.current[trimmedCode] < 2000) {
+      console.log(`Ignoring duplicate scan: ${trimmedCode} from ${source}`);
+      return;
+    }
+    lastProcessedCodes.current[trimmedCode] = nowTs;
+
+    try {
+      await fetch(`${API_BASE_URL}/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode: trimmedCode })
+      });
+    } catch (err) {
+      console.error("Error saving scan:", err);
+    }
+
+    const timeStr = new Date().toLocaleTimeString();
+    setDashboardScans((prev) => [...prev, { value: trimmedCode, ts: nowTs, scanner: colNum }]);
+    setLastInputSource(`Scanner ${colNum} (${source} @ ${timeStr}): ${trimmedCode}`);
+    setScannerStatuses((prev) => ({ ...prev, [colNum]: "Active" }));
+  };
 
   useEffect(() => {
-    const processScan = async (scannedValue, source = "Serial") => {
-      const code = scannedValue.trim();
-      if (!code) return;
-
-      // --- STRICT VALIDATION ---
-      if (code.length > 20) {
-        console.warn(`Blocked long scan (${code.length} chars): ${code}`);
-        setLastInputSource(`⚠️ Blocked: Scan too long (${source})`);
-        return;
-      }
-
-      const upperCode = code.toUpperCase();
-
-      const hasA = upperCode.includes("A");
-      const hasB = upperCode.includes("B");
-      const aIndex = upperCode.indexOf("A");
-      const bIndex = upperCode.indexOf("B");
-
-      if ((hasA && hasB) || (hasA && aIndex > 0) || (hasB && bIndex > 0)) {
-        console.error("Concatenated scan detected:", code);
-        alert("Overlapping/Concatenated scans detected! Please scan again.");
-        setLastInputSource(`⚠️ Blocked: Concatenated scan (${source})`);
-        return;
-      }
-
-      const firstChar = upperCode.charAt(0);
-      let colNum = 1;
-      if (firstChar >= "A" && firstChar <= "Z") {
-        colNum = firstChar.charCodeAt(0) - 64;
-      } else if (source && source.includes(":") && !isNaN(parseInt(source.split(":").pop()))) {
-        colNum = parseInt(source.split(":").pop()) || 1;
-      }
-
-      // De-duplication: Ignore if exactly the same code was scanned in the last 2000ms
-      const nowTs = Date.now();
-      if (lastProcessedCodes.current[code] && nowTs - lastProcessedCodes.current[code] < 2000) {
-        console.log(`Ignoring duplicate scan: ${code} from ${source}`);
-        return;
-      }
-      lastProcessedCodes.current[code] = nowTs;
-
-      try {
-        await fetch(`${API_BASE_URL}/scan`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ barcode: code })
-        });
-      } catch (err) {
-        console.error("Error saving scan:", err);
-      }
-
-      const timeStr = new Date().toLocaleTimeString();
-
-      setDashboardScans((prev) => [...prev, { value: code, ts: nowTs, scanner: colNum }]);
-      setLastInputSource(`Scanner ${colNum} (${source} @ ${timeStr}): ${code}`);
-      setScannerStatuses((prev) => ({ ...prev, [colNum]: "Active" }));
-    };
-
     let isUnmounted = false;
     let reconnectTimeout = null;
 
@@ -966,6 +946,7 @@ function RackHistory() {
   const [showEndModal, setShowEndModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [auditName, setAuditName] = useState("");
+  const uploadAuditExcelRef = useRef(null);
 
   // Keep a ref for WebSocket handler to always have latest session
   const activeSessionRef = useRef(null);
@@ -1021,7 +1002,7 @@ function RackHistory() {
               }).catch(err => console.error("Save scan error:", err));
 
               if (!isUnmounted) {
-                setSessionScans(prev => [...prev, { barcode: rawBarcode, timestamp: new Date(), scanner: scannerNum }]);
+                setSessionScans(prev => [{ barcode: rawBarcode, timestamp: new Date(), scanner: scannerNum }, ...prev]);
               }
             }
           } catch (e) {
@@ -1102,11 +1083,75 @@ function RackHistory() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode, scanner: String(colNum) })
       });
-      setSessionScans(prev => [...prev, { barcode, timestamp: new Date(), scanner: String(colNum) }]);
+      setSessionScans(prev => [{ barcode, timestamp: new Date(), scanner: String(colNum) }, ...prev]);
       setManualInputs(prev => ({ ...prev, [column]: "" }));
     } catch (err) {
       console.error("Error adding manual barcode:", err);
       alert("Failed to add barcode.");
+    }
+  };
+
+  const parseAuditBarcodeExcel = async (file) => {
+    const workbook = new ExcelJS.Workbook();
+    const arrayBuffer = await file.arrayBuffer();
+    await workbook.xlsx.load(arrayBuffer);
+    const worksheet = workbook.getWorksheet(1) || workbook.worksheets[0];
+    if (!worksheet) throw new Error("No worksheets found in the Excel file.");
+
+    const scans = [];
+    worksheet.eachRow({ includeEmpty: true }, (row) => {
+      const firstCell = row.getCell(1);
+      const value = firstCell && firstCell.value !== null && firstCell.value !== undefined ? String(firstCell.value).trim() : "";
+      if (value) {
+        scans.push({ barcode: value, timestamp: new Date(), scanner: "1" });
+      }
+    });
+
+    return scans;
+  };
+
+  const handleUploadAuditExcel = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const namePrompt = window.prompt("Audit Name", "Uploaded Audit");
+      const auditNameValue = (namePrompt || "Uploaded Audit").trim() || "Uploaded Audit";
+      const uploadedScans = await parseAuditBarcodeExcel(file);
+      const uploadedAt = new Date();
+
+      const createSessionRes = await fetch(`${API_BASE_URL}/audit-sessions`, { method: "POST" });
+      const createSessionData = await createSessionRes.json();
+      if (!createSessionRes.ok || !createSessionData.session) {
+        throw new Error(createSessionData.error || "Failed to create uploaded audit session");
+      }
+
+      const saveSessionRes = await fetch(`${API_BASE_URL}/audit-sessions/${createSessionData.session._id}/end`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          save: true,
+          name: auditNameValue,
+          scans: uploadedScans.map(scan => ({ ...scan, timestamp: uploadedAt, scanner: "1" })),
+          startTime: uploadedAt.toISOString(),
+          endTime: uploadedAt.toISOString()
+        })
+      });
+
+      const saveData = await saveSessionRes.json();
+      if (!saveSessionRes.ok) {
+        throw new Error(saveData.error || "Failed to save uploaded audit");
+      }
+
+      alert(`Uploaded audit saved as "${auditNameValue}" with ${uploadedScans.length} barcode(s).`);
+      setShowSaveModal(false);
+      setAuditName("");
+      window.location.href = "/audit-history";
+    } catch (err) {
+      console.error("Error uploading audit Excel:", err);
+      alert("Failed to upload audit Excel: " + err.message);
+    } finally {
+      e.target.value = "";
     }
   };
 
@@ -1233,7 +1278,8 @@ function RackHistory() {
     )
   );
   const autoCount = Math.max(serverScannerCount, ...detectedNums, 2);
-  const maxScannerNum = manualScannerCount || autoCount;
+  const actualScannerCount = Math.max(2, autoCount);
+  const maxScannerNum = manualScannerCount || actualScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   const scansByScanner = scannersToShow.map(num =>
@@ -1291,7 +1337,7 @@ function RackHistory() {
                   outline: "none"
                 }}
               >
-                <option value="auto">Auto ({autoCount} Active Scanners)</option>
+                <option value="auto">Auto ({actualScannerCount} Active Scanners)</option>
                 <option value={2}>2 Scanners</option>
                 <option value={3}>3 Scanners</option>
                 <option value={4}>4 Scanners</option>
@@ -1299,6 +1345,28 @@ function RackHistory() {
                 <option value={6}>6 Scanners</option>
                 <option value={8}>8 Scanners</option>
               </select>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                style={{ display: "none" }}
+                ref={uploadAuditExcelRef}
+                onChange={handleUploadAuditExcel}
+              />
+              <button
+                onClick={() => uploadAuditExcelRef.current?.click()}
+                style={{
+                  background: "linear-gradient(180deg, #0284c7 0%, #0369a1 100%)",
+                  color: "#fff",
+                  border: "none",
+                  padding: "10px 20px",
+                  borderRadius: 20,
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  fontSize: 15
+                }}
+              >
+                Upload Excel
+              </button>
               <button
                 onClick={handleStartAudit}
                 disabled={!sessionLoaded || activeSession !== null}
@@ -1526,7 +1594,7 @@ function AuditHistory() {
                   <th style={{ padding: 12, color: "#334155" }}>Audit Name</th>
                   <th style={{ padding: 12, color: "#334155" }}>Start Time</th>
                   <th style={{ padding: 12, color: "#334155" }}>End Time</th>
-                  <th style={{ padding: 12, color: "#334155" }}>Total Items</th>
+                  <th style={{ padding: 12, color: "#334155" }}>Total Qty</th>
                   <th style={{ padding: 12, color: "#334155" }}>Status</th>
                   <th style={{ padding: 12, textAlign: "center", color: "#334155" }}>Actions</th>
                 </tr>
@@ -2066,22 +2134,23 @@ function ProductManagement() {
       <div style={{ padding: "0 32px 32px 32px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
-            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><ClipboardIcon size={28} /> Product Master Data</span></h1>
+            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><ClipboardIcon size={28} /> Master Stock</span></h1>
             <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Manage your products, import from Excel, and export data.</p>
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: "10px", marginBottom: "20px", flexWrap: "wrap" }}>
-          {!formVisible && (
+        <div style={{ display: "flex", marginBottom: "20px", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          {/* {!formVisible && (
             <button
               onClick={() => setFormVisible(true)}
               className="btn btn-success"
             >
               <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Add New Product</span>
             </button>
-          )}
+          )} */}
 
-          <input
+          {/* <input
             type="file"
             accept=".xlsx, .xls"
             style={{ display: "none" }}
@@ -2094,23 +2163,9 @@ function ProductManagement() {
             disabled={loading}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><DownloadIcon size={16} /> Import Products</span>
-          </button>
+          </button> */}
 
-          <input
-            type="file"
-            accept=".xlsx, .xls"
-            style={{ display: "none" }}
-            ref={importSalesRef}
-            onChange={handleImportSales}
-          />
-          <button
-            className="btn"
-            style={{ background: "#f59e0b", color: "#fff" }}
-            onClick={() => importSalesRef.current.click()}
-            disabled={loading}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Import Sales</span>
-          </button>
+         
 
           <input
             type="file"
@@ -2125,7 +2180,23 @@ function ProductManagement() {
             onClick={() => receivedStockRef.current.click()}
             disabled={loading}
           >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Received Stock</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Stock Inward</span>
+          </button>
+
+           <input
+            type="file"
+            accept=".xlsx, .xls"
+            style={{ display: "none" }}
+            ref={importSalesRef}
+            onChange={handleImportSales}
+          />
+          <button
+            className="btn"
+            style={{ background: "#f59e0b", color: "#fff" }}
+            onClick={() => importSalesRef.current.click()}
+            disabled={loading}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Import Sales</span>
           </button>
 
           <input
@@ -2159,7 +2230,8 @@ function ProductManagement() {
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Shrinkage</span>
           </button>
-
+          </div>
+          <div>
           <button
             className="btn"
             style={{ background: "#2e7d32", color: "#fff" }}
@@ -2168,6 +2240,7 @@ function ProductManagement() {
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><UploadIcon size={16} /> Export Excel</span>
           </button>
+          </div>
         </div>
 
         {formVisible && (
@@ -2325,9 +2398,9 @@ function ProductManagement() {
                 <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
                   <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Barcode</th>
                   <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Product Name</th>
-                  <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
                   <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>System Quantity</th>
-                  <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Actions</th>
+                  <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
+                  {/* <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Actions</th> */}
                 </tr>
               </thead>
               <tbody>
@@ -2335,9 +2408,9 @@ function ProductManagement() {
                   <tr key={product._id} style={{ borderBottom: "1px solid #eee" }}>
                     <td style={{ padding: 12, fontFamily: "monospace", fontWeight: 600 }}>{product.barcode}</td>
                     <td style={{ padding: 12 }}>{product.productName}</td>
-                    <td style={{ textAlign: "center", padding: 12 }}>₹{product.mrp}</td>
                     <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{product.physicalQuantity}</td>
-                    <td style={{ textAlign: "center", padding: 12 }}>
+                    <td style={{ textAlign: "center", padding: 12 }}>₹{product.mrp}</td>
+                    {/* <td style={{ textAlign: "center", padding: 12 }}>
                       <button
                         onClick={() => handleEdit(product)}
                         style={{ background: "#e0f2fe", color: "#0284c7", border: "none", padding: "6px 12px", borderRadius: 4, cursor: "pointer", fontSize: 12, fontWeight: 600, marginRight: 8 }}
@@ -2350,7 +2423,7 @@ function ProductManagement() {
                       >
                         Delete
                       </button>
-                    </td>
+                    </td> */}
                   </tr>
                 ))}
               </tbody>
@@ -2643,63 +2716,62 @@ function ReconciliationReport() {
 
   const exportToExcel = async () => {
     const workbook = new ExcelJS.Workbook();
-    // 1. Create a sheet with a specific name
     const sheet = workbook.addWorksheet("Reconciliation Report");
 
-    // 2. Define headers and add them to the sheet
     const headers = [
-      "Barcode", "Product Name", "System Quantity", "MRP",
-      "Total Amount (Sys Qty)", "Physical Quantity", "Total Amount (Phy Qty)", "Diff Qty", "Diff Amt"
+      "Barcode", "Product Name", "MRP", "",
+      "System Qty", "System Value", "",
+      "Phy Qty", "Phy Value", "",
+      "Diff", "Diff Value"
     ];
     sheet.addRow(headers);
 
-    // 3. Format the header row (Bold + Background Color)
     const headerRow = sheet.getRow(1);
-    headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } }; // White font
+    headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
     headerRow.fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FF1565C0" } // Blue background
+      fgColor: { argb: "FF1565C0" }
     };
     headerRow.alignment = { vertical: "middle", horizontal: "center" };
 
-    // 4. Map data rows
     data.forEach(item => {
       sheet.addRow([
         item.barcode,
         item.productName,
-        item.phyQty,
         item.mrp,
-        item.phyAmt,
+        "",
         item.sysQty,
         item.sysAmt,
+        "",
+        item.phyQty,
+        item.phyAmt,
+        "",
         item.diff,
         item.diffAmt
       ]);
     });
 
-    // 5. Add a blank row and then the Summary row
     sheet.addRow([]);
     const summaryRow = sheet.addRow([
-      "TOTAL", "", summary.totalPhyQty, "", summary.totalPhyAmt,
-      summary.totalSysQty, summary.totalSysAmt, summary.totalDiffQty, summary.totalDiffAmt
+      "TOTAL", "", "", "",
+      summary.totalSysQty, summary.totalSysAmt, "",
+      summary.totalPhyQty, summary.totalPhyAmt, "",
+      summary.totalDiffQty, summary.totalDiffAmt
     ]);
 
-    // Format Summary row
     summaryRow.font = { bold: true };
     summaryRow.fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFF8F9FA" } // Light grey background
+      fgColor: { argb: "FFF8F9FA" }
     };
 
-    // Auto-fit columns roughly
     sheet.columns.forEach((column) => {
       column.width = 15;
     });
-    sheet.getColumn(2).width = 30; // Product Name wider
+    sheet.getColumn(2).width = 30;
 
-    // 6. Generate Excel file and trigger download
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
     saveAs(blob, `Reconciliation_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
@@ -2711,7 +2783,7 @@ function ReconciliationReport() {
       <div style={{ padding: "0 32px 32px 32px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
-            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><BarChartIcon size={28} /> Global Inventory Reconciliation</span></h1>
+            <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}><span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><BarChartIcon size={28} /> Inventory Reconciliation</span></h1>
             <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Running totals vs Master Data • {new Date().toLocaleString()}</p>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
@@ -2725,19 +2797,48 @@ function ReconciliationReport() {
           </div>
         </div>
 
+        <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+            <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8, border: "1px solid #dbeafe" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total System Qty</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>{summary.totalSysQty}</div>
+            </div>
+            <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8, border: "1px solid #dbeafe" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total System Value</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>₹{summary.totalSysAmt.toLocaleString()}</div>
+            </div>
+            <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8, border: "1px solid #f3e8ff" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Phy Qty</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: "#7c3aed" }}>{summary.totalPhyQty}</div>
+            </div>
+            <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8, border: "1px solid #f3e8ff" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Phy Value</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: "#7c3aed" }}>₹{summary.totalPhyAmt.toLocaleString()}</div>
+            </div>
+            <div style={{ background: summary.totalDiffQty === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8, border: summary.totalDiffQty === 0 ? "1px solid #bbf7d0" : "1px solid #fecaca" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Diff</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</div>
+            </div>
+            <div style={{ background: summary.totalDiffAmt === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8, border: summary.totalDiffAmt === 0 ? "1px solid #bbf7d0" : "1px solid #fecaca" }}>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Diff Value</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffAmt > 0 ? '+' : ''}₹{Math.abs(summary.totalDiffAmt).toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
+
         <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #ddd" }}>
-                <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Barcode</th>
-                <th style={{ textAlign: "left", padding: 12, fontWeight: 700 }}>Product Name</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>System Quantity</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>MRP</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Total Amount (Sys Qty)</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Physical Quantity</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700 }}>Total Amount (Phy Qty)</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diff !== 0) ? "#c62828" : "#2e7d32" }}>Diff</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diffAmt !== 0) ? "#c62828" : "#2e7d32" }}>Diff Amt</th>
+                <th style={{ textAlign: "left", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0" }}>Barcode</th>
+                <th style={{ textAlign: "left", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0" }}>Product Name</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0" }}>MRP</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>System Qty</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>System Value</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Phy Qty</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Phy Value</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0", color: data.some(d => d.diff !== 0) ? "#c62828" : "#2e7d32" }}>Diff</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diffAmt !== 0) ? "#c62828" : "#2e7d32" }}>Diff Value</th>
               </tr>
             </thead>
             <tbody>
@@ -2745,14 +2846,14 @@ function ReconciliationReport() {
                 const diffColor = item.diff === 0 ? "#2e7d32" : "#c62828";
                 return (
                   <tr key={idx} style={{ borderBottom: "1px solid #eee" }}>
-                    <td style={{ padding: 12, fontFamily: "monospace", fontWeight: 600 }}>{item.barcode}</td>
-                    <td style={{ padding: 12 }}>{item.productName}</td>
-                    <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{item.phyQty}</td>
-                    <td style={{ textAlign: "center", padding: 12 }}>₹{item.mrp}</td>
-                    <td style={{ textAlign: "center", padding: 12 }}>₹{item.phyAmt.toLocaleString()}</td>
-                    <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{item.sysQty}</td>
-                    <td style={{ textAlign: "center", padding: 12 }}>₹{item.sysAmt.toLocaleString()}</td>
-                    <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>{item.diff > 0 ? '+' : ''}{item.diff}</td>
+                    <td style={{ padding: 12, fontFamily: "monospace", fontWeight: 600, borderRight: "1px solid #f1f5f9" }}>{item.barcode}</td>
+                    <td style={{ padding: 12, borderRight: "1px solid #f1f5f9" }}>{item.productName}</td>
+                    <td style={{ textAlign: "center", padding: 12, borderRight: "1px solid #f1f5f9" }}>₹{item.mrp}</td>
+                    <td style={{ textAlign: "center", padding: 12, background: "#eef2ff", borderRight: "1px solid #c7d2fe", fontWeight: 600 }}>{item.sysQty}</td>
+                    <td style={{ textAlign: "center", padding: 12, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>₹{item.sysAmt.toLocaleString()}</td>
+                    <td style={{ textAlign: "center", padding: 12, background: "#f5f3ff", borderRight: "1px solid #ddd6fe", fontWeight: 600 }}>{item.phyQty}</td>
+                    <td style={{ textAlign: "center", padding: 12, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>₹{item.phyAmt.toLocaleString()}</td>
+                    <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor, borderRight: "1px solid #f1f5f9" }}>{item.diff > 0 ? '+' : ''}{item.diff}</td>
                     <td style={{ textAlign: "center", padding: 12, fontWeight: 700, color: diffColor }}>{item.diffAmt > 0 ? '+' : ''}₹{Math.abs(item.diffAmt).toLocaleString()}</td>
                   </tr>
                 );
@@ -2760,47 +2861,18 @@ function ReconciliationReport() {
             </tbody>
             <tfoot>
               <tr style={{ background: "#f8f9fa", borderTop: "2px solid #ddd", fontWeight: 700 }}>
-                <td colSpan="2" style={{ padding: 12 }}>TOTAL</td>
-                <td style={{ textAlign: "center", padding: 12 }}>{summary.totalPhyQty}</td>
-                <td style={{ textAlign: "center", padding: 12 }}>-</td>
-                <td style={{ textAlign: "center", padding: 12 }}>₹{summary.totalPhyAmt.toLocaleString()}</td>
-                <td style={{ textAlign: "center", padding: 12 }}>{summary.totalSysQty}</td>
-                <td style={{ textAlign: "center", padding: 12 }}>₹{summary.totalSysAmt.toLocaleString()}</td>
-                <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</td>
+                <td style={{ padding: 12, borderRight: "1px solid #e2e8f0" }}>TOTAL</td>
+                <td style={{ padding: 12, borderRight: "1px solid #e2e8f0" }}></td>
+                <td style={{ textAlign: "center", padding: 12, borderRight: "1px solid #e2e8f0" }}>-</td>
+                <td style={{ textAlign: "center", padding: 12, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>{summary.totalSysQty}</td>
+                <td style={{ textAlign: "center", padding: 12, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>₹{summary.totalSysAmt.toLocaleString()}</td>
+                <td style={{ textAlign: "center", padding: 12, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>{summary.totalPhyQty}</td>
+                <td style={{ textAlign: "center", padding: 12, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>₹{summary.totalPhyAmt.toLocaleString()}</td>
+                <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828", borderRight: "1px solid #e2e8f0" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</td>
                 <td style={{ textAlign: "center", padding: 12, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffAmt > 0 ? '+' : ''}₹{Math.abs(summary.totalDiffAmt).toLocaleString()}</td>
               </tr>
             </tfoot>
           </table>
-        </div>
-
-        <div style={{ background: "#fff", padding: 20, borderRadius: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.06)", marginTop: 20 }}>
-          <h2 style={{ margin: "0 0 16px", color: "#1a1a2e" }}>Summary</h2>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
-            <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total System Quantity</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>{summary.totalPhyQty}</div>
-            </div>
-            <div style={{ background: "#f5f9ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Amount (Sys Qty)</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>₹{summary.totalPhyAmt.toLocaleString()}</div>
-            </div>
-            <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Physical Quantity</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "#6a1b9a" }}>{summary.totalSysQty}</div>
-            </div>
-            <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Amount (Phy Qty)</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: "#6a1b9a" }}>₹{summary.totalSysAmt.toLocaleString()}</div>
-            </div>
-            <div style={{ background: summary.totalDiffQty === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Diff Qty</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffQty === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffQty > 0 ? '+' : ''}{summary.totalDiffQty}</div>
-            </div>
-            <div style={{ background: summary.totalDiffAmt === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8 }}>
-              <div style={{ fontSize: 13, color: "#666", marginBottom: 4 }}>Total Diff Amount</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: summary.totalDiffAmt === 0 ? "#2e7d32" : "#c62828" }}>{summary.totalDiffAmt > 0 ? '+' : ''}₹{Math.abs(summary.totalDiffAmt).toLocaleString()}</div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -2815,6 +2887,10 @@ function ActivityLogs() {
   const [expandedSessions, setExpandedSessions] = useState({});
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const [sessionNotes, setSessionNotes] = useState({});
+  const [editingNoteId, setEditingNoteId] = useState(null);
+  const [savingNoteId, setSavingNoteId] = useState(null);
+  const [editedNoteValues, setEditedNoteValues] = useState({});
 
   useEffect(() => {
     fetchSessions();
@@ -2838,6 +2914,43 @@ function ActivityLogs() {
 
   const toggleSession = (sessionId) => {
     setExpandedSessions(prev => ({ ...prev, [sessionId]: !prev[sessionId] }));
+  };
+
+  const calculateSessionTotals = (sessionProducts) => {
+    let totalQty = 0;
+    let totalValue = 0;
+    sessionProducts.forEach(p => {
+      const qty = Number(p.quantity) || 0;
+      const mrp = Number(p.mrp) || 0;
+      totalQty += qty;
+      totalValue += qty * mrp;
+    });
+    return { totalQty, totalValue };
+  };
+
+  const handleNoteSave = async (sessionId, noteText) => {
+    try {
+      setSavingNoteId(sessionId);
+      const truncatedNote = String(noteText || "").substring(0, 30);
+      const response = await fetch(`${API_BASE_URL}/import-sessions/${sessionId}/note`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: truncatedNote })
+      });
+      if (response.ok) {
+        setSessionNotes(prev => ({ ...prev, [sessionId]: truncatedNote }));
+        setSessions(prev => prev.map(s => s.importSessionId === sessionId ? { ...s, notes: truncatedNote } : s));
+        setEditedNoteValues(prev => ({ ...prev, [sessionId]: "" }));
+        setEditingNoteId(null);
+      } else {
+        alert("Failed to save note. Please try again.");
+      }
+    } catch (err) {
+      console.error("Error saving note:", err);
+      alert("Failed to save note: " + err.message);
+    } finally {
+      setSavingNoteId(null);
+    }
   };
 
   const getImportTypeBadge = (importType) => {
@@ -3098,7 +3211,7 @@ function ActivityLogs() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div>
             <h1 style={{ margin: 0, color: "#0f172a", fontWeight: 800, fontSize: "28px", letterSpacing: "-0.5px" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: "10px" }}><ClipboardIcon size={28} /> Activity Logs</span>
+              <span style={{ display: "flex", alignItems: "center", gap: "10px" }}><ClipboardIcon size={28} /> Stock Movement Log</span>
             </h1>
             <p style={{ margin: "4px 0 0 0", color: "#64748b", fontSize: "14px" }}>Import history — expand any row to view product-level details.</p>
           </div>
@@ -3213,7 +3326,7 @@ function ActivityLogs() {
           </div>
 
           {/* Card 4: Total Out Product Quantity */}
-          <div style={{
+          {/* <div style={{
             background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
             border: "1px solid #fed7aa",
             borderRadius: "8px",
@@ -3231,10 +3344,10 @@ function ActivityLogs() {
             <span style={{ fontSize: "13px", color: "#c2410c", fontWeight: 500 }}>
               Total Out Product Quantity: <strong style={{ fontWeight: 700 }}>{totalSales}</strong>
             </span>
-          </div>
+          </div> */}
 
           {/* Card 6: Total Available Product Quantity */}
-          <div style={{
+          {/* <div style={{
             background: "linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)",
             border: "1px solid #e9d5ff",
             borderRadius: "8px",
@@ -3252,7 +3365,7 @@ function ActivityLogs() {
             <span style={{ fontSize: "13px", color: "#581c87", fontWeight: 500 }}>
               Total Available Product Quantity: <strong style={{ fontWeight: 700 }}>{totalSystemQty}</strong>
             </span>
-          </div>
+          </div> */}
 
           {/* Row 2 Col 1 Spacer */}
           <div></div>
@@ -3279,7 +3392,7 @@ function ActivityLogs() {
           </div>
 
           {/* Card 5: Total Out Product Amount */}
-          <div style={{
+          {/* <div style={{
             background: "linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%)",
             border: "1px solid #fed7aa",
             borderRadius: "8px",
@@ -3297,10 +3410,10 @@ function ActivityLogs() {
             <span style={{ fontSize: "13px", color: "#c2410c", fontWeight: 500 }}>
               Total Out Product Amount: <strong style={{ fontWeight: 700 }}>₹{totalSalesAmt.toLocaleString()}</strong>
             </span>
-          </div>
+          </div> */}
 
           {/* Card 7: Total Available Product Amount */}
-          <div style={{
+          {/* <div style={{
             background: "linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)",
             border: "1px solid #e9d5ff",
             borderRadius: "8px",
@@ -3318,25 +3431,30 @@ function ActivityLogs() {
             <span style={{ fontSize: "13px", color: "#581c87", fontWeight: 500 }}>
               Total Available Product Amount: <strong style={{ fontWeight: 700 }}>₹{totalSystemAmt.toLocaleString()}</strong>
             </span>
-          </div>
+          </div> */}
         </div>
 
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <div className="card" style={{ padding: 0, overflow: "hidden", width: "100%", boxSizing: "border-box" }}>
           {/* Table header */}
           <div style={{
             display: "grid",
-            gridTemplateColumns: "200px 1fr 140px 160px 48px",
+            gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr 1fr 48px",
             gap: 0,
             background: "#e2e8f0",
-            padding: "12px 20px",
+            padding: "12px 16px",
             fontWeight: 700,
             fontSize: "13px",
             color: "#475569",
-            borderBottom: "1px solid #cbd5e1"
+            borderBottom: "1px solid #cbd5e1",
+            width: "100%",
+            boxSizing: "border-box"
           }}>
             <span>Time Stamp</span>
-            <span>Import Type</span>
-            <span style={{ textAlign: "center" }}>Total Products</span>
+            <span>Movement Type</span>
+            <span>Notes</span>
+            <span style={{ textAlign: "center" }}>Product Count</span>
+            <span style={{ textAlign: "center" }}>Total Qty</span>
+            <span style={{ textAlign: "center" }}>Total Value</span>
             <span style={{ textAlign: "center" }}>Action</span>
             <span></span>
           </div>
@@ -3348,38 +3466,94 @@ function ActivityLogs() {
           ) : (
             sessions.map((session, idx) => {
               const isExpanded = !!expandedSessions[session.importSessionId];
+              const isEditingNote = editingNoteId === session.importSessionId;
+              const currentNote = sessionNotes[session.importSessionId] || session.notes || "";
+              const { totalQty, totalValue } = calculateSessionTotals(session.products);
               return (
                 <div key={session.importSessionId} style={{ borderBottom: idx < sessions.length - 1 ? "1px solid #e2e8f0" : "none" }}>
                   {/* Session row */}
                   <div style={{
                     display: "grid",
-                    gridTemplateColumns: "200px 1fr 140px 160px 48px",
+                    gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr 1fr 48px",
                     gap: 0,
-                    padding: "14px 20px",
+                    padding: "12px 16px",
                     alignItems: "center",
                     background: isExpanded ? "#f1f5f9" : "#fff",
-                    cursor: "pointer",
-                    transition: "background 0.15s"
+                    transition: "background 0.15s",
+                    width: "100%",
+                    boxSizing: "border-box"
                   }}
-                    onClick={() => toggleSession(session.importSessionId)}
                   >
-                    <span style={{ fontSize: "13px", color: "#475569", whiteSpace: "nowrap" }}>
+                    <span style={{ fontSize: "13px", color: "#475569", whiteSpace: "nowrap", cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>
                       {new Date(session.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).replace(",", "")}
                     </span>
-                    <span>{getImportTypeBadge(session.importType)}</span>
-                    <span style={{ textAlign: "center", fontWeight: 700, color: "#0f172a", fontSize: "15px" }}>
+                    <span style={{ cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>{getImportTypeBadge(session.importType)}</span>
+                    <span onClick={(e) => e.stopPropagation()}>
+                      {isEditingNote ? (
+                        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                          <input
+                            type="text"
+                            maxLength="30"
+                            value={editedNoteValues[session.importSessionId] || currentNote || ""}
+                            onChange={(e) => setEditedNoteValues(prev => ({ ...prev, [session.importSessionId]: e.target.value }))}
+                            onKeyDown={(e) => {
+                              if (e.key === "Escape") {
+                                setEditedNoteValues(prev => ({ ...prev, [session.importSessionId]: "" }));
+                                setEditingNoteId(null);
+                              }
+                            }}
+                            autoFocus
+                            style={{ flex: 1, padding: "4px 8px", borderRadius: "4px", border: "1px solid #3b82f6", fontSize: "12px", outline: "none" }}
+                          />
+                          <button
+                            onClick={() => handleNoteSave(session.importSessionId, editedNoteValues[session.importSessionId] || currentNote || "")}
+                            disabled={savingNoteId === session.importSessionId}
+                            style={{ padding: "4px 8px", borderRadius: "4px", background: "#16a34a", color: "#fff", border: "none", cursor: savingNoteId === session.importSessionId ? "not-allowed" : "pointer", fontSize: "11px", fontWeight: 600 }}
+                            title="Save note"
+                          >
+                            {savingNoteId === session.importSessionId ? "..." : "Save"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setEditedNoteValues(prev => ({ ...prev, [session.importSessionId]: "" }));
+                              setEditingNoteId(null);
+                            }}
+                            disabled={savingNoteId === session.importSessionId}
+                            style={{ padding: "4px 8px", borderRadius: "4px", background: "#94a3b8", color: "#fff", border: "none", cursor: savingNoteId === session.importSessionId ? "not-allowed" : "pointer", fontSize: "11px", fontWeight: 600 }}
+                            title="Cancel edit"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <span
+                          style={{ fontSize: "12px", color: "#64748b", cursor: "pointer", padding: "4px 8px", borderRadius: "4px", background: "#f1f5f9", display: "inline-block", maxWidth: "130px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          onClick={() => setEditingNoteId(session.importSessionId)}
+                          title={currentNote}
+                        >
+                          {currentNote || "—"}
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ textAlign: "center", fontWeight: 700, color: "#0f172a", fontSize: "14px", cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>
                       {session.products.length}
                     </span>
-                    <span style={{ textAlign: "center" }}>
+                    <span style={{ textAlign: "center", fontWeight: 600, color: "#0f172a", fontSize: "14px", cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>
+                      {totalQty}
+                    </span>
+                    <span style={{ textAlign: "center", fontWeight: 600, color: "#0f172a", fontSize: "14px", cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>
+                      ₹{totalValue.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                    </span>
+                    <span style={{ textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
                       <button
                         className="btn"
-                        style={{ background: "#16a34a", color: "#fff", padding: "6px 14px", fontSize: "12px", fontWeight: 600, borderRadius: "6px" }}
+                        style={{ background: "#16a34a", color: "#fff", padding: "6px 12px", fontSize: "12px", fontWeight: 600, borderRadius: "6px" }}
                         onClick={(e) => { e.stopPropagation(); handleExportSession(session); }}
                       >
-                        <span style={{ display: "flex", alignItems: "center", gap: "5px" }}><DownloadIcon size={13} /> Export Excel</span>
+                        <span style={{ display: "flex", alignItems: "center", gap: "4px" }}><DownloadIcon size={12} /> Export</span>
                       </button>
                     </span>
-                    <span style={{ textAlign: "center", color: "#64748b", fontSize: "18px", userSelect: "none" }}>
+                    <span style={{ textAlign: "center", color: "#64748b", fontSize: "16px", userSelect: "none", cursor: "pointer" }} onClick={() => toggleSession(session.importSessionId)}>
                       {isExpanded ? "▲" : "▼"}
                     </span>
                   </div>

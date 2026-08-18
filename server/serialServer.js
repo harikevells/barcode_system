@@ -89,6 +89,16 @@ const activityLogSchema = new mongoose.Schema({
 
 const ActivityLog = mongoose.model("ActivityLog", activityLogSchema);
 
+// ImportSession model to store session metadata like notes
+const importSessionSchema = new mongoose.Schema({
+  importSessionId: { type: String, required: true, unique: true },
+  notes: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const ImportSession = mongoose.model("ImportSession", importSessionSchema);
+
 // Helper function to log actions
 async function logActivity(action, productName, previousValue, updatedValue, actionType, barcode = "", details = "", importSessionId = "", mrp = 0, quantity = 0) {
   try {
@@ -108,6 +118,76 @@ async function logActivity(action, productName, previousValue, updatedValue, act
   } catch (err) {
     console.error("❌ Failed to log activity:", err);
   }
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeText(value) {
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function normalizeNumber(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(String(value).replace(/[₹,\s]/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isValidStockInwardRow(item = {}) {
+  const barcode = normalizeText(item.barcode);
+  const productName = normalizeText(item.productName);
+  const mrp = normalizeNumber(item.mrp ?? item.price ?? item.rate);
+  const quantity = Number.parseInt(item.physicalQuantity ?? item.quantity ?? item.qty ?? 0, 10);
+
+  return Boolean(barcode && productName && mrp !== null && Number.isFinite(quantity) && quantity >= 0);
+}
+
+async function findBarcodeMatch(barcode) {
+  const cleanBarcode = normalizeText(barcode);
+  if (!cleanBarcode) return [];
+
+  return Product.find({
+    barcode: { $regex: `^${escapeRegex(cleanBarcode)}$`, $options: "i" }
+  });
+}
+
+async function createUniqueBarcode(baseBarcode) {
+  const candidateBase = normalizeText(baseBarcode) || `GEN_${Date.now()}`;
+  let candidate = candidateBase;
+  let suffix = 1;
+
+  while (await Product.findOne({ barcode: { $regex: `^${escapeRegex(candidate)}$`, $options: "i" } })) {
+    candidate = `${candidateBase}-${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+async function resolveReceivedStockTarget(item) {
+  const barcode = normalizeText(item.barcode);
+  const productName = normalizeText(item.productName);
+  const mrp = normalizeNumber(item.mrp ?? item.price ?? item.rate);
+
+  if (!barcode) return { action: "skip" };
+
+  const exactBarcodes = await findBarcodeMatch(barcode);
+  if (exactBarcodes.length === 0) {
+    return { action: "create" };
+  }
+
+  const matched = exactBarcodes.find((product) => {
+    const sameName = normalizeText(product.productName) === productName;
+    const sameMrp = Number(product.mrp) === Number(mrp);
+    return sameName && sameMrp;
+  });
+
+  if (matched) {
+    return { action: "update", product: matched };
+  }
+
+  return { action: "create" };
 }
 
 
@@ -653,8 +733,60 @@ app.get("/api/import-sessions", async (req, res) => {
     // Sort all sessions by timestamp descending
     allSessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
 
+    // Load notes for each session from ImportSession collection
+    for (const session of allSessions) {
+      const sessionDoc = await ImportSession.findOne({ importSessionId: session.importSessionId });
+      if (sessionDoc) {
+        session.notes = sessionDoc.notes || "";
+      }
+    }
+
     res.json(allSessions);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save notes for an import session
+app.put("/api/import-sessions/:sessionId/note", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { notes } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: "Session ID is required." });
+    }
+    
+    // Limit notes to 30 characters
+    const truncatedNotes = String(notes || "").substring(0, 30);
+    
+    let session = await ImportSession.findOne({ importSessionId: sessionId });
+    if (!session) {
+      session = new ImportSession({
+        importSessionId: sessionId,
+        notes: truncatedNotes
+      });
+    } else {
+      session.notes = truncatedNotes;
+      session.updatedAt = new Date();
+    }
+    
+    await session.save();
+    res.json({ message: "Note saved successfully.", notes: truncatedNotes });
+  } catch (err) {
+    console.error("Error saving note:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get notes for an import session
+app.get("/api/import-sessions/:sessionId/note", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await ImportSession.findOne({ importSessionId: sessionId });
+    res.json({ notes: session?.notes || "" });
+  } catch (err) {
+    console.error("Error retrieving note:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -752,55 +884,55 @@ app.post("/api/products/received-stock", async (req, res) => {
       return res.status(400).json({ error: "Invalid body. 'products' array is required." });
     }
 
+    const invalidRows = products.filter((item) => !isValidStockInwardRow(item));
+    if (invalidRows.length > 0) {
+      return res.status(400).json({
+        error: "Unable to Run",
+        message: "Barcode, Product Name, MRP and Quantity are required for all rows before running Stock Inward."
+      });
+    }
+
     const sessionId = "STOCK_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6).toUpperCase();
     let updatedCount = 0;
     let createdCount = 0;
 
     for (const item of products) {
-      const barcode = item.barcode ? String(item.barcode).trim() : "";
-      const productName = item.productName ? String(item.productName).trim() : "";
-      const receivedQty = parseInt(item.physicalQuantity !== undefined ? item.physicalQuantity : (item.quantity !== undefined ? item.quantity : 0)) || 0;
-      const mrp = item.mrp !== undefined ? parseFloat(item.mrp) : undefined;
+      const barcode = normalizeText(item.barcode);
+      const productName = normalizeText(item.productName);
+      const receivedQty = Number.parseInt(item.physicalQuantity ?? item.quantity ?? item.qty ?? 0, 10) || 0;
+      const mrp = normalizeNumber(item.mrp ?? item.price ?? item.rate);
 
-      if (!barcode && !productName) continue;
+      const target = await resolveReceivedStockTarget(item);
 
-      let product = null;
-      if (barcode) {
-        product = await Product.findOne({ barcode: new RegExp("^" + barcode.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
-      }
-      if (!product && productName) {
-        product = await Product.findOne({ productName: new RegExp("^" + productName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
-      }
-
-      if (product) {
-        const previousQty = product.physicalQuantity || 0;
+      if (target.action === "update" && target.product) {
+        const previousQty = Number(target.product.physicalQuantity) || 0;
         const newQty = previousQty + receivedQty;
-        const finalMRP = (mrp !== undefined && !isNaN(mrp)) ? mrp : product.mrp;
+        const finalMRP = mrp !== null ? mrp : Number(target.product.mrp) || 0;
 
-        product.physicalQuantity = newQty;
-        if (productName) product.productName = productName;
-        if (mrp !== undefined && !isNaN(mrp)) product.mrp = mrp;
-        product.updatedAt = new Date();
+        target.product.productName = productName;
+        target.product.mrp = finalMRP;
+        target.product.physicalQuantity = newQty;
+        target.product.updatedAt = new Date();
 
-        await product.save();
+        await target.product.save();
         updatedCount++;
 
         await logActivity(
           "STOCK_RECEIVED_UPDATE",
-          product.productName,
+          target.product.productName,
           previousQty,
           newQty,
           `Received Stock (+${receivedQty})`,
-          product.barcode,
+          target.product.barcode,
           "",
           sessionId,
           finalMRP,
           receivedQty
         );
       } else {
-        const finalBarcode = barcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
-        const finalName = productName || "Item " + finalBarcode;
-        const finalMRP = (mrp !== undefined && !isNaN(mrp)) ? mrp : 0;
+        const finalBarcode = await createUniqueBarcode(barcode || `GEN_${Date.now()}`);
+        const finalName = productName || `Item ${finalBarcode}`;
+        const finalMRP = mrp !== null ? mrp : 0;
 
         const newProduct = new Product({
           barcode: finalBarcode,
@@ -853,43 +985,42 @@ app.post("/api/sales/import", async (req, res) => {
     const warnings = [];
 
     for (const item of sales) {
-      const { barcode, productName, quantity } = item;
-      const soldQty = parseInt(quantity) || 0;
-      if (soldQty <= 0) continue; // Skip invalid quantities
-
-      let product = null;
-      if (barcode) {
-        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
-      }
-      if (!product && productName) {
-        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      const barcode = normalizeText(item.barcode);
+      const productName = normalizeText(item.productName);
+      const soldQty = Number.parseInt(item.quantity ?? item.physicalQuantity ?? item.qty ?? 0, 10) || 0;
+      if (soldQty <= 0) continue;
+      if (!barcode) {
+        warnings.push(`Skipped row without barcode: ${productName || "Unknown Product"}`);
+        continue;
       }
 
-      if (product) {
-        const previousQty = product.physicalQuantity || 0;
-        const newQty = Math.max(0, previousQty - soldQty);
-
-        product.physicalQuantity = newQty;
-        product.updatedAt = new Date();
-        await product.save();
-
-        await logActivity(
-          "SALES_IMPORT",
-          product.productName,
-          previousQty,
-          newQty,
-          "Sales Import",
-          product.barcode,
-          `Sold: ${soldQty} units`,
-          sessionId,
-          product.mrp,
-          soldQty
-        );
-        processedCount++;
-      } else {
-        const identifier = barcode || productName || "Unknown Product";
-        warnings.push(`Product '${identifier}' not found in master data.`);
+      const matches = await findBarcodeMatch(barcode);
+      if (matches.length !== 1) {
+        warnings.push(`Barcode '${barcode}' was skipped because it was not uniquely found in master data (${matches.length} matches).`);
+        continue;
       }
+
+      const product = matches[0];
+      const previousQty = Number(product.physicalQuantity) || 0;
+      const newQty = Math.max(0, previousQty - soldQty);
+
+      product.physicalQuantity = newQty;
+      product.updatedAt = new Date();
+      await product.save();
+
+      await logActivity(
+        "SALES_IMPORT",
+        product.productName,
+        previousQty,
+        newQty,
+        "Sales Import",
+        product.barcode,
+        `Sold: ${soldQty} units`,
+        sessionId,
+        product.mrp,
+        soldQty
+      );
+      processedCount++;
     }
 
     res.json({
@@ -916,43 +1047,42 @@ app.post("/api/tester-damage/import", async (req, res) => {
     const warnings = [];
 
     for (const item of testerDamage) {
-      const { barcode, productName, quantity } = item;
-      const removeQty = parseInt(quantity) || 0;
-      if (removeQty <= 0) continue; // Skip invalid quantities
-
-      let product = null;
-      if (barcode) {
-        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
-      }
-      if (!product && productName) {
-        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      const barcode = normalizeText(item.barcode);
+      const productName = normalizeText(item.productName);
+      const removeQty = Number.parseInt(item.quantity ?? item.physicalQuantity ?? item.qty ?? 0, 10) || 0;
+      if (removeQty <= 0) continue;
+      if (!barcode) {
+        warnings.push(`Skipped row without barcode: ${productName || "Unknown Product"}`);
+        continue;
       }
 
-      if (product) {
-        const previousQty = product.physicalQuantity || 0;
-        const newQty = Math.max(0, previousQty - removeQty);
-
-        product.physicalQuantity = newQty;
-        product.updatedAt = new Date();
-        await product.save();
-
-        await logActivity(
-          "TESTER_DAMAGE_IMPORT",
-          product.productName,
-          previousQty,
-          newQty,
-          "Tester/ Damage",
-          product.barcode,
-          `Removed: ${removeQty} units (Tester/Damage)`,
-          sessionId,
-          product.mrp,
-          removeQty
-        );
-        processedCount++;
-      } else {
-        const identifier = barcode || productName || "Unknown Product";
-        warnings.push(`Product '${identifier}' not found in master data.`);
+      const matches = await findBarcodeMatch(barcode);
+      if (matches.length !== 1) {
+        warnings.push(`Barcode '${barcode}' was skipped because it was not uniquely found in master data (${matches.length} matches).`);
+        continue;
       }
+
+      const product = matches[0];
+      const previousQty = Number(product.physicalQuantity) || 0;
+      const newQty = Math.max(0, previousQty - removeQty);
+
+      product.physicalQuantity = newQty;
+      product.updatedAt = new Date();
+      await product.save();
+
+      await logActivity(
+        "TESTER_DAMAGE_IMPORT",
+        product.productName,
+        previousQty,
+        newQty,
+        "Tester/ Damage",
+        product.barcode,
+        `Removed: ${removeQty} units (Tester/Damage)`,
+        sessionId,
+        product.mrp,
+        removeQty
+      );
+      processedCount++;
     }
 
     res.json({
@@ -979,43 +1109,42 @@ app.post("/api/shrinkage/import", async (req, res) => {
     const warnings = [];
 
     for (const item of shrinkage) {
-      const { barcode, productName, quantity } = item;
-      const removeQty = parseInt(quantity) || 0;
-      if (removeQty <= 0) continue; // Skip invalid quantities
-
-      let product = null;
-      if (barcode) {
-        product = await Product.findOne({ barcode: new RegExp("^" + String(barcode).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
-      }
-      if (!product && productName) {
-        product = await Product.findOne({ productName: new RegExp("^" + String(productName).trim().replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + "$", "i") });
+      const barcode = normalizeText(item.barcode);
+      const productName = normalizeText(item.productName);
+      const removeQty = Number.parseInt(item.quantity ?? item.physicalQuantity ?? item.qty ?? 0, 10) || 0;
+      if (removeQty <= 0) continue;
+      if (!barcode) {
+        warnings.push(`Skipped row without barcode: ${productName || "Unknown Product"}`);
+        continue;
       }
 
-      if (product) {
-        const previousQty = product.physicalQuantity || 0;
-        const newQty = Math.max(0, previousQty - removeQty);
-
-        product.physicalQuantity = newQty;
-        product.updatedAt = new Date();
-        await product.save();
-
-        await logActivity(
-          "SHRINKAGE_IMPORT",
-          product.productName,
-          previousQty,
-          newQty,
-          "Shrinkage",
-          product.barcode,
-          `Removed: ${removeQty} units (Shrinkage)`,
-          sessionId,
-          product.mrp,
-          removeQty
-        );
-        processedCount++;
-      } else {
-        const identifier = barcode || productName || "Unknown Product";
-        warnings.push(`Product '${identifier}' not found in master data.`);
+      const matches = await findBarcodeMatch(barcode);
+      if (matches.length !== 1) {
+        warnings.push(`Barcode '${barcode}' was skipped because it was not uniquely found in master data (${matches.length} matches).`);
+        continue;
       }
+
+      const product = matches[0];
+      const previousQty = Number(product.physicalQuantity) || 0;
+      const newQty = Math.max(0, previousQty - removeQty);
+
+      product.physicalQuantity = newQty;
+      product.updatedAt = new Date();
+      await product.save();
+
+      await logActivity(
+        "SHRINKAGE_IMPORT",
+        product.productName,
+        previousQty,
+        newQty,
+        "Shrinkage",
+        product.barcode,
+        `Removed: ${removeQty} units (Shrinkage)`,
+        sessionId,
+        product.mrp,
+        removeQty
+      );
+      processedCount++;
     }
 
     res.json({
@@ -1213,14 +1342,20 @@ app.delete("/api/audit-sessions/:id/scan", async (req, res) => {
 // End / Save an audit session
 app.put("/api/audit-sessions/:id/end", async (req, res) => {
   try {
-    const { save, name, scans } = req.body;
+    const { save, name, scans, startTime, endTime } = req.body;
     const session = await AuditSession.findById(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found" });
-    session.endTime = new Date();
+
+    if (startTime) session.startTime = new Date(startTime);
+    session.endTime = endTime ? new Date(endTime) : new Date();
     session.status = save ? "saved" : "discarded";
     session.name = name || session.auditId;
     if (scans && Array.isArray(scans)) {
-      session.scans = scans;
+      session.scans = scans.map(scan => ({
+        barcode: scan.barcode,
+        timestamp: scan.timestamp ? new Date(scan.timestamp) : new Date(),
+        scanner: scan.scanner || "1"
+      }));
     }
     session.totalScannedItems = session.scans.length;
     await session.save();
