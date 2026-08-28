@@ -3,10 +3,50 @@ import { HashRouter as Router, Routes, Route, Link, useNavigate, useLocation } f
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import Select from "react-select";
+import { ShopDropdown, ShopSelectorModal } from "./Shops";
 import { BarChartIcon, ClipboardIcon, BoxIcon, ScrollIcon, FileIcon, PlusIcon, DownloadIcon, TrendingDownIcon, UploadIcon, ArrowLeftIcon, SearchIcon, FolderIcon, TrashIcon, LockIcon, EyeIcon, EyeOffIcon } from "./icons";
 
 
-const API_BASE_URL = "http://16.16.123.89:5001/api";
+
+// Dynamically connect to whichever IP or hostname you are currently visiting in your browser
+// export const API_BASE_URL = `http://localhost:5001/api`;
+
+
+export const API_BASE_URL = "http://16.16.123.89:5001/api"
+
+
+let activeShopId = localStorage.getItem('activeShopId') || null;
+
+export const setActiveShop = (id) => {
+  activeShopId = id;
+  if (id) {
+    localStorage.setItem('activeShopId', id);
+  } else {
+    localStorage.removeItem('activeShopId');
+  }
+};
+
+export const getActiveShop = () => activeShopId;
+
+const originalFetch = window.fetch;
+window.fetch = async function () {
+  let [resource, config] = arguments;
+  if (resource && typeof resource === 'string' && resource.startsWith(API_BASE_URL)) {
+    if (activeShopId) {
+      if (!config) config = {};
+      if (!config.headers) config.headers = {};
+
+      if (config.headers instanceof Headers) {
+        config.headers.set('x-shop-id', activeShopId);
+      } else {
+        config.headers['x-shop-id'] = activeShopId;
+      }
+    }
+  }
+  return originalFetch.apply(this, [resource, config]);
+};
+
+
 
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
@@ -406,6 +446,9 @@ function Header() {
         })}
       </nav>
 
+      {/* Center-Right: Shop Dropdown */}
+      <div style={{ marginRight: "16px" }}><ShopDropdown /></div>
+
       {/* Right: Actions */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <Link
@@ -488,9 +531,9 @@ function Header() {
         </button>
       </div>
 
-      <AdminAuthModal 
-        isOpen={isAuthOpen} 
-        onClose={() => setIsAuthOpen(false)} 
+      <AdminAuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
         onSuccess={async () => {
           if (window.confirm("WARNING: This will delete ALL data from ALL databases including products, logs, etc. Proceed?")) {
             try {
@@ -568,7 +611,7 @@ function Dashboard() {
   const [serverScannerCount, setServerScannerCount] = useState(2);
   const [manualScannerCount, setManualScannerCount] = useState(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
-  const [authSuccessCallback, setAuthSuccessCallback] = useState(() => () => {});
+  const [authSuccessCallback, setAuthSuccessCallback] = useState(() => () => { });
   const [aData, setAData] = useState([]);
   const [bData, setBData] = useState([]);
   const wsRef = useRef(null);
@@ -637,7 +680,7 @@ function Dashboard() {
 
     const connectWS = () => {
       if (isUnmounted) return;
-      const ws = new WebSocket("ws://16.16.123.89:8080");
+      const ws = new WebSocket(`ws://16.16.123.89:8080`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -891,10 +934,10 @@ function Dashboard() {
           })}
         </div>
       </div>
-      <AdminAuthModal 
-        isOpen={isAuthOpen} 
-        onClose={() => setIsAuthOpen(false)} 
-        onSuccess={authSuccessCallback} 
+      <AdminAuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        onSuccess={authSuccessCallback}
       />
     </div>
   );
@@ -955,6 +998,50 @@ function RackHistory() {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
 
+  // HID Scanner support for RackHistory
+  const hidBuffer = useRef("");
+  const hidTimer = useRef(null);
+
+  useEffect(() => {
+    const processHIDScan = (code) => {
+      if (!activeSessionRef.current) return;
+      const colNum = "1"; // Default for HID
+      fetch(`${API_BASE_URL}/audit-sessions/${activeSessionRef.current._id}/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode: code, scanner: colNum })
+      }).catch(err => console.error("Save HID scan error:", err));
+      setSessionScans(prev => [...prev, { barcode: code, timestamp: new Date(), scanner: colNum }]);
+    };
+
+    const handleKeydownDetection = (e) => {
+      if (e.key === "Enter" && hidBuffer.current.length > 3) {
+        if (hidTimer.current) clearTimeout(hidTimer.current);
+        const code = hidBuffer.current;
+        hidBuffer.current = "";
+        processHIDScan(code);
+        return;
+      }
+
+      if (e.key.length === 1) {
+        if (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA") return;
+        hidBuffer.current += e.key;
+        if (hidTimer.current) clearTimeout(hidTimer.current);
+        hidTimer.current = setTimeout(() => {
+          if (hidBuffer.current.length > 3) {
+            processHIDScan(hidBuffer.current);
+          }
+          hidBuffer.current = "";
+        }, 50);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeydownDetection);
+    return () => {
+      window.removeEventListener("keydown", handleKeydownDetection);
+    };
+  }, []);
+
   // WebSocket connection — clean reconnect loop
   useEffect(() => {
     let isUnmounted = false;
@@ -964,7 +1051,7 @@ function RackHistory() {
     const connectWS = () => {
       if (isUnmounted) return;
       try {
-        ws = new WebSocket("ws://16.16.123.89:8080");
+        ws = new WebSocket(`ws://16.16.123.89:8080`);
 
         ws.onopen = () => {
           console.log("✅ WebSocket connected to ws://16.16.123.89:8080");
@@ -1001,8 +1088,15 @@ function RackHistory() {
                 body: JSON.stringify({ barcode: rawBarcode, scanner: scannerNum })
               }).catch(err => console.error("Save scan error:", err));
 
+              console.log("Checking isUnmounted:", isUnmounted);
               if (!isUnmounted) {
-                setSessionScans(prev => [{ barcode: rawBarcode, timestamp: new Date(), scanner: scannerNum }, ...prev]);
+                setSessionScans(prev => {
+                  const newState = [...prev, { barcode: rawBarcode, timestamp: new Date(), scanner: scannerNum }];
+                  console.log("STATE UPDATE TRIGGERED, old length:", prev.length, "new length:", newState.length);
+                  return newState;
+                });
+              } else {
+                console.warn("isUnmounted is TRUE, skipping state update!");
               }
             }
           } catch (e) {
@@ -1083,7 +1177,7 @@ function RackHistory() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ barcode, scanner: String(colNum) })
       });
-      setSessionScans(prev => [{ barcode, timestamp: new Date(), scanner: String(colNum) }, ...prev]);
+      setSessionScans(prev => [...prev, { barcode, timestamp: new Date(), scanner: String(colNum) }]);
       setManualInputs(prev => ({ ...prev, [column]: "" }));
     } catch (err) {
       console.error("Error adding manual barcode:", err);
@@ -1405,6 +1499,7 @@ function RackHistory() {
           </div>
 
           <div style={{ overflowX: "auto", width: "100%", borderRadius: 8 }}>
+            {console.log("RENDERING TABLE, sessionScans length:", sessionScans.length, "maxRows:", maxRows, "filteredData length:", filteredData.length, "scannersToShow:", scannersToShow)}
             <table style={{ width: "100%", minWidth: `${Math.max(800, scannersToShow.length * 270)}px`, borderCollapse: "collapse", fontSize: 14, tableLayout: "fixed" }}>
               <thead>
                 <tr style={{ background: "#f8f9fa", borderBottom: "2px solid #eee" }}>
@@ -2141,7 +2236,7 @@ function ProductManagement() {
 
         <div style={{ display: "flex", marginBottom: "20px", justifyContent: "space-between" }}>
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-          {/* {!formVisible && (
+            {/* {!formVisible && (
             <button
               onClick={() => setFormVisible(true)}
               className="btn btn-success"
@@ -2150,7 +2245,7 @@ function ProductManagement() {
             </button>
           )} */}
 
-          {/* <input
+            {/* <input
             type="file"
             accept=".xlsx, .xls"
             style={{ display: "none" }}
@@ -2165,81 +2260,81 @@ function ProductManagement() {
             <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><DownloadIcon size={16} /> Import Products</span>
           </button> */}
 
-         
 
-          <input
-            type="file"
-            accept=".xlsx, .xls"
-            style={{ display: "none" }}
-            ref={receivedStockRef}
-            onChange={handleReceivedStock}
-          />
-          <button
-            className="btn"
-            style={{ background: "#0284c7", color: "#fff" }}
-            onClick={() => receivedStockRef.current.click()}
-            disabled={loading}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Stock Inward</span>
-          </button>
 
-           <input
-            type="file"
-            accept=".xlsx, .xls"
-            style={{ display: "none" }}
-            ref={importSalesRef}
-            onChange={handleImportSales}
-          />
-          <button
-            className="btn"
-            style={{ background: "#f59e0b", color: "#fff" }}
-            onClick={() => importSalesRef.current.click()}
-            disabled={loading}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Import Sales</span>
-          </button>
+            <input
+              type="file"
+              accept=".xlsx, .xls"
+              style={{ display: "none" }}
+              ref={receivedStockRef}
+              onChange={handleReceivedStock}
+            />
+            <button
+              className="btn"
+              style={{ background: "#0284c7", color: "#fff" }}
+              onClick={() => receivedStockRef.current.click()}
+              disabled={loading}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><PlusIcon size={16} /> Stock Inward</span>
+            </button>
 
-          <input
-            type="file"
-            accept=".xlsx, .xls"
-            style={{ display: "none" }}
-            ref={testerDamageRef}
-            onChange={handleImportTesterDamage}
-          />
-          <button
-            className="btn"
-            style={{ background: "#e11d48", color: "#fff" }}
-            onClick={() => testerDamageRef.current.click()}
-            disabled={loading}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Tester/ Damage</span>
-          </button>
+            <input
+              type="file"
+              accept=".xlsx, .xls"
+              style={{ display: "none" }}
+              ref={importSalesRef}
+              onChange={handleImportSales}
+            />
+            <button
+              className="btn"
+              style={{ background: "#f59e0b", color: "#fff" }}
+              onClick={() => importSalesRef.current.click()}
+              disabled={loading}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Import Sales</span>
+            </button>
 
-          <input
-            type="file"
-            accept=".xlsx, .xls"
-            style={{ display: "none" }}
-            ref={shrinkageRef}
-            onChange={handleImportShrinkage}
-          />
-          <button
-            className="btn"
-            style={{ background: "#475569", color: "#fff" }}
-            onClick={() => shrinkageRef.current.click()}
-            disabled={loading}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Shrinkage</span>
-          </button>
+            <input
+              type="file"
+              accept=".xlsx, .xls"
+              style={{ display: "none" }}
+              ref={testerDamageRef}
+              onChange={handleImportTesterDamage}
+            />
+            <button
+              className="btn"
+              style={{ background: "#e11d48", color: "#fff" }}
+              onClick={() => testerDamageRef.current.click()}
+              disabled={loading}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Tester/ Damage</span>
+            </button>
+
+            <input
+              type="file"
+              accept=".xlsx, .xls"
+              style={{ display: "none" }}
+              ref={shrinkageRef}
+              onChange={handleImportShrinkage}
+            />
+            <button
+              className="btn"
+              style={{ background: "#475569", color: "#fff" }}
+              onClick={() => shrinkageRef.current.click()}
+              disabled={loading}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><TrendingDownIcon size={16} /> Shrinkage</span>
+            </button>
           </div>
           <div>
-          <button
-            className="btn"
-            style={{ background: "#2e7d32", color: "#fff" }}
-            onClick={handleExportProducts}
-            disabled={loading || products.length === 0}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><UploadIcon size={16} /> Export Excel</span>
-          </button>
+            <button
+              className="btn"
+              style={{ background: "#2e7d32", color: "#fff" }}
+              onClick={handleExportProducts}
+              disabled={loading || products.length === 0}
+            >
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><UploadIcon size={16} /> Export Excel</span>
+            </button>
           </div>
         </div>
 
@@ -2483,7 +2578,7 @@ function AuditScanning() {
 
   useEffect(() => {
     if (compareAuditId) return; // Do not connect WS if we are just comparing an old session
-    const ws = new WebSocket("ws://16.16.123.89:8080");
+    const ws = new WebSocket(`ws://16.16.123.89:8080`);
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -3032,7 +3127,7 @@ function ActivityLogs() {
       // 1. Summary Sheet
       const summarySheet = workbook.addWorksheet("Monthly Summary");
       summarySheet.views = [{ showGridLines: true }];
-      
+
       const titleCell = summarySheet.getCell("A1");
       const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
       titleCell.value = `Monthly Inventory Report - ${monthNames[selectedMonth]} ${selectedYear}`;
@@ -3083,7 +3178,7 @@ function ActivityLogs() {
 
         // Filter sessions of this type
         const sessionsOfType = currentMonthSessions.filter(s => s.importType === importType);
-        
+
         // Group products by barcode (or productName if barcode is empty) to avoid duplicates
         const grouped = {};
         sessionsOfType.forEach(session => {
@@ -3092,7 +3187,7 @@ function ActivityLogs() {
             const barcodeKey = String(p.barcode || "").trim();
             const nameKey = String(p.productName || "").trim();
             const key = (barcodeKey || nameKey || "unknown").toLowerCase();
-            
+
             if (!grouped[key]) {
               grouped[key] = {
                 barcode: barcodeKey,
@@ -3107,7 +3202,7 @@ function ActivityLogs() {
                 grouped[key].latestDate = sessionDate;
               }
             }
-            
+
             grouped[key].quantity += Number(p.quantity) || 0;
             if (p.action) {
               grouped[key].actions.add(p.action);
@@ -3129,7 +3224,7 @@ function ActivityLogs() {
           if (hasAction) {
             rowData.push(Array.from(item.actions).join(", "));
           }
-          
+
           const addedRow = sheet.addRow(rowData);
           addedRow.getCell(3).numFmt = "₹#,##0.00";
           addedRow.getCell(3).alignment = { horizontal: "right" };
@@ -3178,7 +3273,7 @@ function ActivityLogs() {
   };
 
   const overallProductCount = products.length;
-  
+
   // Filter log sessions to the selected calendar month dynamically
   const currentMonthSessions = sessions.filter(session => {
     const d = new Date(session.timestamp);
@@ -3296,8 +3391,8 @@ function ActivityLogs() {
             cursor: "default",
             justifyContent: "center"
           }}
-          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
-          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+            onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#1e3a8a", fontWeight: 500 }}>
               Overall Product Count: <strong style={{ fontWeight: 700 }}>{overallProductCount}</strong>
@@ -3317,8 +3412,8 @@ function ActivityLogs() {
             cursor: "default",
             justifyContent: "center"
           }}
-          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
-          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+            onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
               Total Product Quantity: <strong style={{ fontWeight: 700 }}>{overallProductQty}</strong>
@@ -3383,8 +3478,8 @@ function ActivityLogs() {
             cursor: "default",
             justifyContent: "center"
           }}
-          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
-          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
+            onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+            onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
               Total Product Amount: <strong style={{ fontWeight: 700 }}>₹{overallProductAmt.toLocaleString()}</strong>
@@ -3678,12 +3773,20 @@ function LicenseWrapper({ children }) {
 }
 
 // --- MAIN APP WITH ROUTING ---
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('auth') === 'true');
+  const [shopSelected, setShopSelected] = useState(() => !!localStorage.getItem('activeShopId'));
 
   const handleLogin = () => {
     localStorage.setItem('auth', 'true');
     setIsAuthenticated(true);
+    setShopSelected(false);
+    localStorage.removeItem('activeShopId');
+  };
+
+  const handleShopSelected = () => {
+    setShopSelected(true);
   };
 
   if (!isAuthenticated) {
@@ -3691,6 +3794,15 @@ function App() {
       <LicenseWrapper>
         <style>{globalStyles}</style>
         <Login onLogin={handleLogin} />
+      </LicenseWrapper>
+    );
+  }
+
+  if (!shopSelected) {
+    return (
+      <LicenseWrapper>
+        <style>{globalStyles}</style>
+        <ShopSelectorModal onSelected={handleShopSelected} />
       </LicenseWrapper>
     );
   }

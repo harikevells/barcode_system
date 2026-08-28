@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 WEB_API_URL = "http://16.16.123.89:5001/api/barcode"
 
+# WEB_API_URL = "http://localhost:5001/api/barcode"
+
 
 # ---------------- SCANNER WORKER ----------------
 

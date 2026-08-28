@@ -1,3 +1,2 @@
-2026/06/13-17:54:50.148 6a03 Reusing MANIFEST /Users/hari/Documents/GitHub/barcode_system/electron/.electron-user-data/Local Storage/leveldb/MANIFEST-000001
-2026/06/13-17:54:50.150 6a03 Recovering log #3
-2026/06/13-17:54:50.150 6a03 Reusing old log /Users/hari/Documents/GitHub/barcode_system/electron/.electron-user-data/Local Storage/leveldb/000003.log 
+2026/08/20-12:50:01.607 425c Creating DB D:\barcode_system\electron\.electron-user-data\Local Storage\leveldb since it was missing.
+2026/08/20-12:50:05.381 425c Reusing MANIFEST D:\barcode_system\electron\.electron-user-data\Local Storage\leveldb/MANIFEST-000001
