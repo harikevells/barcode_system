@@ -2151,10 +2151,16 @@ function ProductManagement() {
     try {
       const response = await fetch(`${API_BASE_URL}/products`);
       const data = await response.json();
-      setProducts(data);
+      if (response.status === 400 && data && data.error === "SHOP_REQUIRED") {
+        setActiveShop(null);
+        window.location.reload();
+        return;
+      }
+      setProducts(Array.isArray(data) ? data : []);
       setLoading(false);
     } catch (err) {
       console.error("Error fetching products:", err);
+      setProducts([]);
       setLoading(false);
     }
   };
@@ -2219,9 +2225,10 @@ function ProductManagement() {
     }
   };
 
-  const overallProductQty = products.length;
-  const totalProductQty = products.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
-  const totalAmount = products.reduce((acc, p) => acc + ((Number(p.mrp) || 0) * (Number(p.physicalQuantity) || 0)), 0);
+  const safeProducts = Array.isArray(products) ? products : [];
+  const overallProductQty = safeProducts.length;
+  const totalProductQty = safeProducts.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
+  const totalAmount = safeProducts.reduce((acc, p) => acc + ((Number(p.mrp) || 0) * (Number(p.physicalQuantity) || 0)), 0);
 
   return (
     <div style={{ minHeight: "100vh", background: "#f8fafc" }}>
@@ -3293,8 +3300,9 @@ function ActivityLogs() {
     }
   });
 
-  const totalSystemQty = products.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
-  const totalSystemAmt = products.reduce((acc, p) => acc + ((Number(p.physicalQuantity) || 0) * (Number(p.mrp) || 0)), 0);
+  const safeProducts = Array.isArray(products) ? products : [];
+  const totalSystemQty = safeProducts.reduce((acc, p) => acc + (Number(p.physicalQuantity) || 0), 0);
+  const totalSystemAmt = safeProducts.reduce((acc, p) => acc + ((Number(p.physicalQuantity) || 0) * (Number(p.mrp) || 0)), 0);
 
   const overallProductQty = totalSystemQty + totalSales;
   const overallProductAmt = totalSystemAmt + totalSalesAmt;
