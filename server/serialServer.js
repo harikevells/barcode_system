@@ -1622,8 +1622,14 @@ console.log(`🚀 Serial WebSocket Server running on ws://localhost:${WSS_PORT}`
 
 const clients = new Set();
 
+function heartbeat() {
+  this.isAlive = true;
+}
+
 wss.on("connection", (ws) => {
   console.log("🔌 Client connected");
+  ws.isAlive = true;
+  ws.on("pong", heartbeat);
   clients.add(ws);
   
   // Send current active scanners count to newly connected client
@@ -1636,6 +1642,22 @@ wss.on("connection", (ws) => {
     console.log("❌ Client disconnected");
     clients.delete(ws);
   });
+});
+
+// Ping clients every 30s to keep connections alive and prevent idle timeouts
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      clients.delete(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on("close", () => {
+  clearInterval(interval);
 });
 
 function broadcast(data) {
