@@ -212,7 +212,8 @@ async function resolveReceivedStockTarget(item, shopId) {
 // --- Express Setup ---
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Global Cache-Control Prevention Middleware
 app.use((req, res, next) => {
@@ -1031,7 +1032,7 @@ app.post("/api/products/import", async (req, res) => {
 // Bulk Received Stock Import (Adds stock to existing products or creates new products)
 app.post("/api/products/received-stock", async (req, res) => {
   try {
-    const { products } = req.body;
+    const { products } = req.body || {};
     if (!Array.isArray(products)) {
       return res.status(400).json({ error: "Invalid body. 'products' array is required." });
     }
