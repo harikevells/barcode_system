@@ -32,7 +32,10 @@ function isDuplicateScan(barcode) {
 
 // --- MongoDB Setup ---
 mongoose.connect("mongodb://127.0.0.1:27017/barcodeDB")
-  .then(() => console.log("📦 Connected to MongoDB"))
+  .then(() => {
+    console.log("📦 Connected to MongoDB");
+    Product.collection.dropIndex("barcode_1").catch(() => {});
+  })
   .catch(err => console.error("❌ MongoDB connection error:", err));
 
 const shopSchema = new mongoose.Schema({
@@ -195,11 +198,17 @@ async function resolveReceivedStockTarget(item, shopId) {
     return { action: "create" };
   }
 
-  const matched = exactBarcodes.find((product) => {
+  // 1. Try exact match (barcode + name + mrp)
+  let matched = exactBarcodes.find((product) => {
     const sameName = normalizeText(product.productName) === productName;
     const sameMrp = Number(product.mrp) === Number(mrp);
     return sameName && sameMrp;
   });
+
+  // 2. Fallback to existing product with same barcode to prevent duplicate key error
+  if (!matched && exactBarcodes.length > 0) {
+    matched = exactBarcodes[0];
+  }
 
   if (matched) {
     return { action: "update", product: matched };
