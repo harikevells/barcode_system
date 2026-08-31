@@ -582,7 +582,7 @@ const parseExcelFile = async (file, expectedType) => {
           colMap.productName = index;
         } else if (cleanHeader.includes("mrp") || cleanHeader.includes("price") || cleanHeader.includes("rate")) {
           colMap.mrp = index;
-        } else if (cleanHeader.includes("qty") || cleanHeader.includes("quantity") || cleanHeader.includes("physicalqty") || cleanHeader.includes("stock") || cleanHeader.includes("count") || cleanHeader.includes("sold")) {
+        } else if (cleanHeader.includes("qty") || cleanHeader.includes("quantity") || cleanHeader.includes("physicalqty") || cleanHeader.includes("systemqty") || cleanHeader.includes("stock") || cleanHeader.includes("count") || cleanHeader.includes("sold")) {
           colMap.quantity = index;
         }
       });
@@ -619,7 +619,7 @@ function Dashboard() {
   const hidTimer = useRef(null);
   const lastProcessedCodes = useRef({});
   const SCANNER_COLORS = ["#1565c0", "#2e7d32", "#ef6c00", "#7c3aed", "#d81b60", "#00897b"];
-  const maxScannerNum = manualScannerCount || serverScannerCount || 2;
+  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : serverScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
 
@@ -961,7 +961,7 @@ function RackHistory() {
   useEffect(() => {
     fetch(`${API_BASE_URL}/scanners/count`)
       .then(res => res.json())
-      .then(data => { if (data && data.count) setServerScannerCount(data.count); })
+      .then(data => { if (data && data.count !== undefined) setServerScannerCount(data.count); })
       .catch(() => { });
 
     fetch(`${API_BASE_URL}/audit-sessions/active/current`)
@@ -1371,9 +1371,9 @@ function RackHistory() {
         .filter(n => n !== null)
     )
   );
-  const autoCount = Math.max(serverScannerCount, ...detectedNums, 2);
-  const actualScannerCount = Math.max(2, autoCount);
-  const maxScannerNum = manualScannerCount || actualScannerCount;
+  const autoCount = Math.max(serverScannerCount, ...detectedNums, 0);
+  const actualScannerCount = autoCount;
+  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : actualScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   const scansByScanner = scannersToShow.map(num =>
@@ -2108,7 +2108,7 @@ function ProductManagement() {
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet("Products Inventory");
 
-      const headers = ["Barcode", "Product Name", "MRP (₹)", "Physical Qty"];
+      const headers = ["Barcode", "Product Name", "MRP (₹)", "System Qty"];
       sheet.addRow(headers);
 
       const headerRow = sheet.getRow(1);
@@ -2661,7 +2661,8 @@ function AuditScanning() {
   };
 
   const completeAudit = () => {
-    navigate("/reconciliation", { state: { selectedBarcodes: Array.from(selectedProducts) } });
+    const auditIdToPass = compareAuditId || (activeSession ? activeSession._id : null);
+    navigate("/reconciliation", { state: { selectedBarcodes: Array.from(selectedProducts), auditId: auditIdToPass } });
   };
 
   return (
@@ -2790,14 +2791,24 @@ function ReconciliationReport() {
   const [loading, setLoading] = useState(true);
   const location = useLocation();
   const selectedBarcodes = location.state?.selectedBarcodes;
+  const auditId = location.state?.auditId;
 
   useEffect(() => {
     const fetchReport = async () => {
       try {
         let url = `${API_BASE_URL}/reconciliation/report`;
+        const params = new URLSearchParams();
         if (selectedBarcodes && selectedBarcodes.length > 0) {
-          url += `?barcodes=${encodeURIComponent(selectedBarcodes.join(","))}`;
+          params.append('barcodes', selectedBarcodes.join(","));
         }
+        if (auditId) {
+          params.append('auditId', auditId);
+        }
+        const queryString = params.toString();
+        if (queryString) {
+          url += `?${queryString}`;
+        }
+
         const response = await fetch(url);
         const data = await response.json();
         setReportData(data);
