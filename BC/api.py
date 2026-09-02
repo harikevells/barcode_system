@@ -26,7 +26,9 @@ def receive_barcode():
         if not data or "barcode" not in data:
             return jsonify({"error": "Missing barcode"}), 400
         
-        scanner_id = data.get("scanner_id", 0)
+        scanner_id = data.get("scanner_id", data.get("scanner", 0))
+        if isinstance(scanner_id, str):
+            scanner_id = int(scanner_id) if scanner_id.isdigit() else 0
         barcode = data.get("barcode", "")
         
         # Store in database

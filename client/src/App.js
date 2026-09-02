@@ -1354,27 +1354,42 @@ function RackHistory() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
+  // Dynamic Scanner Column Mapping for Live Audit
+  const uniqueScannerIds = [];
+  sessionScans.forEach(item => {
+    let rawId = "1";
+    if (item && typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
+      rawId = String(item.scanner);
+    }
+    if (!uniqueScannerIds.includes(rawId)) {
+      uniqueScannerIds.push(rawId);
+    }
+  });
+
+  const rawToColMap = new Map();
+  uniqueScannerIds.forEach((rawId, index) => {
+    rawToColMap.set(rawId, index + 1);
+  });
+
+  const baseScannerCount = Math.max(serverScannerCount || 0, uniqueScannerIds.length, 1);
+  const actualScannerCount = baseScannerCount;
+  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
+
   const getScannerNumber = (item) => {
     if (!item) return 1;
-    const scanner = typeof item === 'object' ? item.scanner : null;
-    if (scanner) {
-      const num = Number(scanner);
-      if (!isNaN(num) && num > 0) return num;
+    let rawId = "1";
+    if (typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
+      rawId = String(item.scanner);
     }
+    if (rawToColMap.has(rawId)) {
+      const mappedCol = rawToColMap.get(rawId);
+      if (mappedCol <= maxScannerNum) return mappedCol;
+    }
+    const num = Number(rawId);
+    if (!isNaN(num) && num > 0 && num <= maxScannerNum) return num;
     return 1;
   };
-
-  const detectedNums = Array.from(
-    new Set(
-      sessionScans
-        .map(item => getScannerNumber(item))
-        .filter(n => n !== null)
-    )
-  );
-  const autoCount = Math.max(serverScannerCount, ...detectedNums, 0);
-  const actualScannerCount = autoCount;
-  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : actualScannerCount;
-  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   const scansByScanner = scannersToShow.map(num =>
     filteredData.filter(item => getScannerNumber(item) === num)
@@ -1753,38 +1768,41 @@ function AuditDetails() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
+  // Dynamic Scanner Column Mapping for AuditDetails
+  const uniqueScannerIds = [];
+  scans.forEach(item => {
+    let rawId = "1";
+    if (item && typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
+      rawId = String(item.scanner);
+    }
+    if (!uniqueScannerIds.includes(rawId)) {
+      uniqueScannerIds.push(rawId);
+    }
+  });
+
+  const rawToColMap = new Map();
+  uniqueScannerIds.forEach((rawId, index) => {
+    rawToColMap.set(rawId, index + 1);
+  });
+
+  const maxScannerNum = Math.max(2, uniqueScannerIds.length);
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
+
   const getScannerNumber = (item) => {
-    if (!item) return null;
-
-    // 1. Try to get scanner number from scanner field (e.g. "1", "Scanner 2", etc.)
-    if (item.scanner) {
-      const match = String(item.scanner).match(/\d+/);
-      if (match) {
-        return parseInt(match[0]);
-      }
+    if (!item) return 1;
+    let rawId = "1";
+    if (typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
+      rawId = String(item.scanner);
     }
-
-    // 2. Fallback to check prefix character in barcode for backwards compatibility
-    if (item.barcode) {
-      const char = item.barcode.charAt(0).toUpperCase();
-      if (char >= 'A' && char <= 'Z') {
-        return char.charCodeAt(0) - 64;
-      }
+    if (rawToColMap.has(rawId)) {
+      const mappedCol = rawToColMap.get(rawId);
+      if (mappedCol <= maxScannerNum) return mappedCol;
     }
-
-    // 3. Fallback for manual or unspecified scans (default to Scanner 1)
+    const num = Number(rawId);
+    if (!isNaN(num) && num > 0 && num <= maxScannerNum) return num;
     return 1;
   };
 
-  const detectedNums = Array.from(
-    new Set(
-      scans
-        .map(item => getScannerNumber(item))
-        .filter(n => n !== null)
-    )
-  );
-  const maxScannerNum = Math.max(2, ...detectedNums);
-  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
   const scansByScanner = scannersToShow.map(num =>
     scans.filter(item => getScannerNumber(item) === num)
   );
