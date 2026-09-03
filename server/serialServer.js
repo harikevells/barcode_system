@@ -488,6 +488,7 @@ app.post("/api/barcode", async (req, res) => {
     broadcast({
       source: "serial",
       port: `RaspberryPi (Scanner ${scannerId})`,
+      scanner: String(scannerId),
       value: barcode,
       timestamp: Date.now()
     });

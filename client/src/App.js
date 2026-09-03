@@ -1354,45 +1354,38 @@ function RackHistory() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
-  // Dynamic Scanner Column Mapping for Live Audit
-  const uniqueScannerIds = [];
-  sessionScans.forEach(item => {
-    let rawId = "1";
-    if (item && typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
-      rawId = String(item.scanner);
-    }
-    if (!uniqueScannerIds.includes(rawId)) {
-      uniqueScannerIds.push(rawId);
-    }
-  });
-
-  const rawToColMap = new Map();
-  uniqueScannerIds.forEach((rawId, index) => {
-    rawToColMap.set(rawId, index + 1);
-  });
-
-  const baseScannerCount = Math.max(serverScannerCount || 0, uniqueScannerIds.length, 1);
-  const actualScannerCount = baseScannerCount;
-  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
-  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
-
+  // Scanner Column Mapping & Sorting for Live Audit
   const getScannerNumber = (item) => {
     if (!item) return 1;
     let rawId = "1";
     if (typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
       rawId = String(item.scanner);
     }
-    if (rawToColMap.has(rawId)) {
-      const mappedCol = rawToColMap.get(rawId);
-      if (mappedCol <= maxScannerNum) return mappedCol;
+    const match = rawId.match(/(\d+)/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > 0) return num;
     }
-    const num = Number(rawId);
-    if (!isNaN(num) && num > 0 && num <= maxScannerNum) return num;
     return 1;
   };
 
+  const activeScannerNums = new Set();
+  sessionScans.forEach(item => {
+    activeScannerNums.add(getScannerNumber(item));
+  });
+
+  const baseScannerCount = Math.max(
+    serverScannerCount || 0,
+    ...Array.from(activeScannerNums),
+    2
+  );
+  const actualScannerCount = baseScannerCount;
+  const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
+
+  // Group scans by scanner and reverse so newest scan is on top row!
   const scansByScanner = scannersToShow.map(num =>
-    filteredData.filter(item => getScannerNumber(item) === num)
+    filteredData.filter(item => getScannerNumber(item) === num).slice().reverse()
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
 
@@ -1768,43 +1761,32 @@ function AuditDetails() {
 
   const SCANNER_COLORS = ["#1565c0", "#6a1b9a", "#00796b", "#d81b60", "#f57c00", "#388e3c", "#5d4037", "#455a64"];
 
-  // Dynamic Scanner Column Mapping for AuditDetails
-  const uniqueScannerIds = [];
-  scans.forEach(item => {
-    let rawId = "1";
-    if (item && typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
-      rawId = String(item.scanner);
-    }
-    if (!uniqueScannerIds.includes(rawId)) {
-      uniqueScannerIds.push(rawId);
-    }
-  });
-
-  const rawToColMap = new Map();
-  uniqueScannerIds.forEach((rawId, index) => {
-    rawToColMap.set(rawId, index + 1);
-  });
-
-  const maxScannerNum = Math.max(2, uniqueScannerIds.length);
-  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
-
+  // Scanner Column Mapping & Sorting for AuditDetails
   const getScannerNumber = (item) => {
     if (!item) return 1;
     let rawId = "1";
     if (typeof item === 'object' && item.scanner !== undefined && item.scanner !== null) {
       rawId = String(item.scanner);
     }
-    if (rawToColMap.has(rawId)) {
-      const mappedCol = rawToColMap.get(rawId);
-      if (mappedCol <= maxScannerNum) return mappedCol;
+    const match = rawId.match(/(\d+)/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > 0) return num;
     }
-    const num = Number(rawId);
-    if (!isNaN(num) && num > 0 && num <= maxScannerNum) return num;
     return 1;
   };
 
+  const activeScannerNums = new Set();
+  scans.forEach(item => {
+    activeScannerNums.add(getScannerNumber(item));
+  });
+
+  const maxScannerNum = Math.max(2, ...Array.from(activeScannerNums));
+  const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
+
+  // Group scans by scanner and reverse so newest scan is on top row!
   const scansByScanner = scannersToShow.map(num =>
-    scans.filter(item => getScannerNumber(item) === num)
+    scans.filter(item => getScannerNumber(item) === num).slice().reverse()
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
 
