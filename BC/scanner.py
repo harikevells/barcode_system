@@ -2,6 +2,7 @@ import threading
 import logging
 import requests
 import sys
+import re
 
 try:
     import evdev
@@ -129,7 +130,11 @@ class ScannerManager:
             logger.warning("evdev not available - no scanners will be detected")
             return []
         
-        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+        raw_paths = evdev.list_devices()
+        # Sort paths by event number ascending (event0, event1, event2...)
+        # This ensures 1st connected scanner = Scanner 1, 2nd = Scanner 2, 3rd = Scanner 3
+        sorted_paths = sorted(raw_paths, key=lambda p: int(re.search(r'\d+', str(p)).group()) if re.search(r'\d+', str(p)) else 0)
+        devices = [evdev.InputDevice(path) for path in sorted_paths]
 
         scanner_devices = []
         seen_phys = set()
