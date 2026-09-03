@@ -400,20 +400,9 @@ function updateActiveScannersCount() {
   }
 }
 
-// Cleanup interval to remove inactive Raspberry Pis (15 seconds timeout)
+// Connected Raspberry Pis / dongles stay registered while server is running
 setInterval(() => {
-  const now = Date.now();
-  let changed = false;
-  for (const [scannerId, lastSeen] of activeRaspberryPis.entries()) {
-    if (now - lastSeen > 60000) {
-      activeRaspberryPis.delete(scannerId);
-      changed = true;
-      console.log(`📡 Scanner ${scannerId} disconnected (timeout).`);
-    }
-  }
-  if (changed) {
-    updateActiveScannersCount();
-  }
+  // Scanners remain registered throughout audit session
 }, 5000);
 
 app.get("/api/scanners/count", (req, res) => {

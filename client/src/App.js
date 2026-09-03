@@ -608,7 +608,7 @@ function Dashboard() {
   const [scannerStatuses, setScannerStatuses] = useState({});
   const [lastInputSource, setLastInputSource] = useState("Waiting for scan...");
   const [wsStatus, setWsStatus] = useState("Connecting...");
-  const [serverScannerCount, setServerScannerCount] = useState(2);
+  const [serverScannerCount, setServerScannerCount] = useState(1);
   const [manualScannerCount, setManualScannerCount] = useState(null);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [authSuccessCallback, setAuthSuccessCallback] = useState(() => () => { });
@@ -955,8 +955,8 @@ function RackHistory() {
   const [selectedBarcodes, setSelectedBarcodes] = useState([]);
   const [manualInputs, setManualInputs] = useState({});
   const [manualScannerCount, setManualScannerCount] = useState(null);
-  const [serverScannerCount, setServerScannerCount] = useState(2);
-  const [sessionMaxColumns, setSessionMaxColumns] = useState(2);
+  const [serverScannerCount, setServerScannerCount] = useState(1);
+  const [sessionMaxColumns, setSessionMaxColumns] = useState(1);
 
   // On mount: fetch active session from DB and restore state
   useEffect(() => {
@@ -1154,7 +1154,7 @@ function RackHistory() {
         activeSessionRef.current = data.session;
         setActiveSession(data.session);
         setSessionScans([]);
-        setSessionMaxColumns(Math.max(serverScannerCount || 0, 2));
+        setSessionMaxColumns(Math.max(serverScannerCount || 0, 1));
         console.log("🟢 Audit started, session ID:", data.session._id);
       }
     } catch (err) {
@@ -1381,8 +1381,8 @@ function RackHistory() {
   const baseScannerCount = Math.max(
     serverScannerCount || 0,
     maxDetectedScanner,
-    sessionMaxColumns || 2,
-    2
+    sessionMaxColumns || 1,
+    1
   );
 
   useEffect(() => {
@@ -1793,7 +1793,7 @@ function AuditDetails() {
     activeScannerNums.add(getScannerNumber(item));
   });
 
-  const maxScannerNum = Math.max(2, ...Array.from(activeScannerNums));
+  const maxScannerNum = Math.max(1, ...Array.from(activeScannerNums));
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
   // Group scans by scanner and reverse so newest scan is on top row!
