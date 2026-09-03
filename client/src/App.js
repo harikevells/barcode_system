@@ -956,6 +956,7 @@ function RackHistory() {
   const [manualInputs, setManualInputs] = useState({});
   const [manualScannerCount, setManualScannerCount] = useState(null);
   const [serverScannerCount, setServerScannerCount] = useState(2);
+  const [sessionMaxColumns, setSessionMaxColumns] = useState(2);
 
   // On mount: fetch active session from DB and restore state
   useEffect(() => {
@@ -1153,6 +1154,7 @@ function RackHistory() {
         activeSessionRef.current = data.session;
         setActiveSession(data.session);
         setSessionScans([]);
+        setSessionMaxColumns(Math.max(serverScannerCount || 0, 2));
         console.log("🟢 Audit started, session ID:", data.session._id);
       }
     } catch (err) {
@@ -1374,11 +1376,21 @@ function RackHistory() {
     activeScannerNums.add(getScannerNumber(item));
   });
 
+  const maxDetectedScanner = activeScannerNums.size > 0 ? Math.max(...Array.from(activeScannerNums)) : 1;
+
   const baseScannerCount = Math.max(
     serverScannerCount || 0,
-    ...Array.from(activeScannerNums),
+    maxDetectedScanner,
+    sessionMaxColumns || 2,
     2
   );
+
+  useEffect(() => {
+    if (baseScannerCount > sessionMaxColumns) {
+      setSessionMaxColumns(baseScannerCount);
+    }
+  }, [baseScannerCount, sessionMaxColumns]);
+
   const actualScannerCount = baseScannerCount;
   const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);

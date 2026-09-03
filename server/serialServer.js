@@ -405,7 +405,7 @@ setInterval(() => {
   const now = Date.now();
   let changed = false;
   for (const [scannerId, lastSeen] of activeRaspberryPis.entries()) {
-    if (now - lastSeen > 15000) {
+    if (now - lastSeen > 60000) {
       activeRaspberryPis.delete(scannerId);
       changed = true;
       console.log(`📡 Scanner ${scannerId} disconnected (timeout).`);
