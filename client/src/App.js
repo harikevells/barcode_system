@@ -1147,6 +1147,16 @@ function RackHistory() {
 
   const handleStartAudit = async () => {
     try {
+      let currentActiveCount = serverScannerCount || 1;
+      try {
+        const countRes = await fetch(`${API_BASE_URL}/scanners/count`);
+        const countData = await countRes.json();
+        if (countData && countData.count !== undefined && countData.count > 0) {
+          currentActiveCount = countData.count;
+          setServerScannerCount(currentActiveCount);
+        }
+      } catch (e) { }
+
       const res = await fetch(`${API_BASE_URL}/audit-sessions`, { method: "POST" });
       const data = await res.json();
       if (data && data.session) {
@@ -1154,8 +1164,9 @@ function RackHistory() {
         activeSessionRef.current = data.session;
         setActiveSession(data.session);
         setSessionScans([]);
-        setSessionMaxColumns(Math.max(serverScannerCount || 0, 1));
-        console.log("🟢 Audit started, session ID:", data.session._id);
+        setSessionMaxColumns(currentActiveCount);
+        setManualScannerCount(null);
+        console.log("🟢 Fresh Audit started with", currentActiveCount, "scanner columns. Session ID:", data.session._id);
       }
     } catch (err) {
       console.error(err);
@@ -1286,6 +1297,8 @@ function RackHistory() {
       setShowSaveModal(false);
       setActiveSession(null);
       setSessionScans([]);
+      setSessionMaxColumns(serverScannerCount || 1);
+      setManualScannerCount(null);
       setAuditName("");
       try {
         localStorage.removeItem("activeSession");
@@ -1313,6 +1326,8 @@ function RackHistory() {
       setShowEndModal(false);
       setActiveSession(null);
       setSessionScans([]);
+      setSessionMaxColumns(serverScannerCount || 1);
+      setManualScannerCount(null);
       try {
         localStorage.removeItem("activeSession");
         localStorage.removeItem("sessionScans");
