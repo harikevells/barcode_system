@@ -3,6 +3,7 @@ import logging
 import requests
 import sys
 import re
+import time
 
 try:
     import evdev
@@ -15,9 +16,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 WEB_API_URL = "http://16.16.123.89:5001/api/barcode"
-
-# WEB_API_URL = "http://localhost:5001/api/barcode"
-
 
 # ---------------- SCANNER WORKER ----------------
 
@@ -62,7 +60,6 @@ class ScannerWorker(threading.Thread):
                                     char = char.replace("NUM_", "")
 
                                 # Accept ALL printable characters: digits AND letters
-                                # Single character = letter or digit key (e.g. KEY_A -> A, KEY_1 -> 1)
                                 if len(char) == 1:
                                     barcode += char.lower()
 
@@ -80,6 +77,7 @@ class ScannerWorker(threading.Thread):
             response = requests.post(
                 WEB_API_URL,
                 json={
+                    "scanner_id": self.scanner_id,
                     "scanner": str(self.scanner_id),
                     "barcode": barcode
                 },
@@ -119,9 +117,10 @@ class ScannerWorker(threading.Thread):
 class ScannerManager:
     def __init__(self, database, scanners):
         self.database = database
-        self.scanners = scanners  # kept for compatibility (not strictly needed now)
+        self.scanners = scanners  # kept for compatibility
         self.workers = {}
         self.running = True
+        self.last_detected_paths = set()
 
     # -------- AUTO DETECT SCANNERS --------
 
@@ -130,84 +129,151 @@ class ScannerManager:
             logger.warning("evdev not available - no scanners will be detected")
             return []
         
-        raw_paths = evdev.list_devices()
-        # Sort paths by event number ascending (event0, event1, event2...)
-        # This ensures 1st connected scanner = Scanner 1, 2nd = Scanner 2, 3rd = Scanner 3
-        sorted_paths = sorted(raw_paths, key=lambda p: int(re.search(r'\d+', str(p)).group()) if re.search(r'\d+', str(p)) else 0)
-        devices = [evdev.InputDevice(path) for path in sorted_paths]
-
         scanner_devices = []
-        seen_phys = set()
+        try:
+            raw_paths = evdev.list_devices()
+            def get_event_num(p):
+                m = re.search(r'event(\d+)', str(p))
+                return int(m.group(1)) if m else 0
 
-        for d in devices:
-            name = d.name.lower()
-            logger.info(f"Inspecting device: {d.path} | Name: {d.name} | Phys: {d.phys}")
+            sorted_paths = sorted(raw_paths, key=get_event_num)
 
-            # Ignore non-scanner system events
-            if any(ignore in name for ignore in ["power button", "video bus", "sleep button", "control button"]):
-                continue
+            devices = []
+            for path in sorted_paths:
+                try:
+                    devices.append(evdev.InputDevice(path))
+                except Exception as dev_err:
+                    logger.warning(f"Could not open device {path}: {dev_err}")
 
-            caps = d.capabilities()
-            if evdev.ecodes.EV_KEY not in caps:
-                continue
+            seen_phys = set()
 
-            keys = caps[evdev.ecodes.EV_KEY]
-            # Barcode HID scanners send standard keyboard keycodes (must have KEY_ENTER and KEY_1)
-            if evdev.ecodes.KEY_ENTER not in keys or evdev.ecodes.KEY_1 not in keys:
-                continue
+            for d in devices:
+                try:
+                    name = d.name.lower()
+                    logger.info(f"Inspecting device: {d.path} | Name: {d.name} | Phys: {d.phys}")
 
-            # Deduplicate multiple interfaces from the same physical USB device
-            phys_base = d.phys.rsplit('/', 1)[0] if d.phys else d.path
-            if phys_base in seen_phys:
-                continue
-            seen_phys.add(phys_base)
+                    # Ignore non-scanner system events
+                    if any(ignore in name for ignore in ["power button", "video bus", "sleep button", "control button"]):
+                        continue
 
-            scanner_devices.append(d)
+                    caps = d.capabilities()
+                    if evdev.ecodes.EV_KEY not in caps:
+                        continue
+
+                    keys = caps[evdev.ecodes.EV_KEY]
+                    if evdev.ecodes.KEY_ENTER not in keys:
+                        continue
+
+                    scanner_like_keys = (
+                        evdev.ecodes.KEY_0,
+                        evdev.ecodes.KEY_1,
+                        evdev.ecodes.KEY_2,
+                        evdev.ecodes.KEY_3,
+                        evdev.ecodes.KEY_4,
+                        evdev.ecodes.KEY_5,
+                        evdev.ecodes.KEY_6,
+                        evdev.ecodes.KEY_7,
+                        evdev.ecodes.KEY_8,
+                        evdev.ecodes.KEY_9,
+                        evdev.ecodes.KEY_A,
+                        evdev.ecodes.KEY_B,
+                        evdev.ecodes.KEY_C,
+                        evdev.ecodes.KEY_KP0,
+                        evdev.ecodes.KEY_KP1,
+                        evdev.ecodes.KEY_KP2,
+                    )
+                    if not any(k in keys for k in scanner_like_keys):
+                        logger.info(f"Skipping non-scanner keyboard input device: {d.path} | Name: {d.name}")
+                        continue
+
+                    # Deduplicate multiple interfaces from the same physical USB device
+                    phys_base = d.phys.rsplit('/', 1)[0] if d.phys else d.path
+                    if phys_base in seen_phys:
+                        continue
+                    seen_phys.add(phys_base)
+
+                    scanner_devices.append(d)
+                except Exception as item_err:
+                    logger.error(f"Error inspecting device {d.path}: {item_err}")
+
+        except Exception as e:
+            logger.error(f"Error in detect_scanners: {e}")
 
         return scanner_devices
 
-    # -------- ASSIGN TO 8 SLOTS --------
+    # -------- REFRESH & ASSIGN SLOTS --------
 
     def assign_slots(self):
+        return self.refresh_scanners()
+
+    def refresh_scanners(self):
         devices = self.detect_scanners()
+        current_paths = set(d.path for d in devices[:8])
 
-        logger.info(f"Detected scanners: {len(devices)}")
+        # If connected device paths have not changed, return early
+        if current_paths == self.last_detected_paths:
+            return len(current_paths)
 
-        # Notify Web API server of detected active scanner count
+        self.last_detected_paths = current_paths
+        detected_count = len(current_paths)
+        logger.info(f"⚡ Active scanner count changed -> {detected_count} scanner(s) connected")
+
+        # Notify Web API server immediately of new scanner count
         try:
             requests.post(
                 WEB_API_URL.replace("/api/barcode", "/api/scanners/count"),
-                json={"count": len(devices)},
+                json={"count": detected_count},
                 timeout=2
             )
         except Exception as e:
             logger.error(f"Failed to send active scanner count: {e}")
 
-        for i, device in enumerate(devices):
-
-            if i >= 8:
-                logger.warning("More than 8 scanners detected, ignoring extras")
-                break
-
+        active_paths = set()
+        for i, device in enumerate(devices[:8]):
+            active_paths.add(device.path)
             scanner_id = i + 1
+
+            if scanner_id in self.workers:
+                current_worker = self.workers[scanner_id]
+                if current_worker.device.path == device.path and current_worker.is_alive():
+                    continue
+                current_worker.running = False
+                del self.workers[scanner_id]
 
             worker = ScannerWorker(scanner_id, device, self.database)
             worker.start()
-
             self.workers[scanner_id] = worker
-
             logger.info(f"Scanner {scanner_id} mapped -> {device.path}")
+
+        # Stop workers for removed scanners
+        for scanner_id, worker in list(self.workers.items()):
+            if worker.device.path not in active_paths:
+                worker.running = False
+                del self.workers[scanner_id]
+                logger.info(f"Scanner {scanner_id} removed -> {worker.device.path}")
+
+        return detected_count
+
+    def _monitor_loop(self):
+        """Background loop: checks every 2 seconds for plugged/unplugged scanners"""
+        while self.running:
+            try:
+                self.refresh_scanners()
+            except Exception as e:
+                logger.error(f"Error in scanner monitor loop: {e}")
+            time.sleep(2)
 
     # -------- START ALL --------
 
     def start_all(self):
-        self.assign_slots()
+        self.refresh_scanners()
+        monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        monitor_thread.start()
 
     # -------- STOP ALL --------
 
     def stop_all(self):
         self.running = False
-
         for worker in self.workers.values():
             worker.running = False
 
