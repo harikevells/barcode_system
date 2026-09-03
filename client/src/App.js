@@ -922,9 +922,9 @@ function Dashboard() {
                 {columnScans.length === 0 ? (
                   <p style={{ color: "#94a3b8", fontStyle: "italic", textAlign: "center" }}>No scans yet.</p>
                 ) : (
-                  columnScans.map((d, i) => (
+                  [...columnScans].reverse().map((d, i) => (
                     <div key={`col-${col}-${i}`} style={{ margin: "6px 0", padding: "10px 14px", background: `${accentColor}08`, borderRadius: 8, fontFamily: "monospace", fontSize: 14, display: "flex", justifyContent: "space-between", border: `1px solid ${accentColor}20` }}>
-                      <span><strong style={{ color: "#94a3b8", marginRight: 8 }}>{i + 1}.</strong>{d.value}</span>
+                      <span><strong style={{ color: "#94a3b8", marginRight: 8 }}>{columnScans.length - i}.</strong>{d.value}</span>
                       <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 500 }}>{new Date(d.ts).toLocaleTimeString()}</span>
                     </div>
                   ))
