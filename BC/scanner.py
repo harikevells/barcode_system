@@ -187,8 +187,11 @@ class ScannerManager:
                         continue
 
                     # Deduplicate multiple interfaces from the same physical USB device
-                    phys_base = d.phys.rsplit('/', 1)[0] if d.phys else d.path
+                    # E.g. 'usb-3f980000.usb-1.2:1.0/input0' and 'usb-3f980000.usb-1.2:1.1/input0' -> base 'usb-3f980000.usb-1.2'
+                    raw_phys = d.phys if d.phys else d.path
+                    phys_base = re.sub(r'[:\.][0-9]+\.[0-9]+.*$', '', raw_phys).rsplit('/', 1)[0]
                     if phys_base in seen_phys:
+                        logger.info(f"Skipping duplicate interface of same physical USB scanner: {d.path} | Phys: {d.phys} -> Base: {phys_base}")
                         continue
                     seen_phys.add(phys_base)
 

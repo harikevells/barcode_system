@@ -410,23 +410,39 @@ app.get("/api/scanners/count", (req, res) => {
 });
 
 app.post("/api/scanners/count", (req, res) => {
-  const { count } = req.body;
-  if (count !== undefined && !isNaN(count)) {
-    activeScannersCount = parseInt(count);
-    console.log(`📡 Updated Active Scanners Count: ${activeScannersCount} (Manual override)`);
-    broadcast({
-      source: "system",
-      activeScannersCount: activeScannersCount
-    });
+  const parsedCount = Number.parseInt(req.body.count, 10);
+
+  if (Number.isInteger(parsedCount) && parsedCount >= 0 && parsedCount <= 8) {
+    if (activeScannersCount !== parsedCount) {
+      activeScannersCount = parsedCount;
+
+      console.log(
+        `📡 Updated Active Scanners Count: ${activeScannersCount}`
+      );
+
+      broadcast({
+        source: "system",
+        activeScannersCount
+      });
+    }
   }
+
   res.json({ success: true, count: activeScannersCount });
 });
 
 // Endpoint for Raspberry Pi Heartbeat
 app.post("/api/scanners/ping", (req, res) => {
-  const scannerId = req.body.scanner || req.body.scannerId || req.body.scanner_id || "1";
+  const scannerId =
+    req.body.scanner ||
+    req.body.scannerId ||
+    req.body.scanner_id ||
+    "1";
+
   activeRaspberryPis.set(String(scannerId), Date.now());
-  updateActiveScannersCount();
+
+  // Do not calculate/broadcast count from ping.
+  // /api/scanners/count is the authoritative source.
+
   res.json({ success: true, activeScannersCount });
 });
 
@@ -453,7 +469,7 @@ app.post("/api/barcode", async (req, res) => {
 
   if (!isNaN(scannerId)) {
     activeRaspberryPis.set(String(scannerId), Date.now());
-    updateActiveScannersCount();
+    // Do not recalculate count here — /api/scanners/count is authoritative
   }
 
   if (isDuplicateScan(barcode)) {
