@@ -1530,10 +1530,13 @@ app.post("/api/audit-sessions", async (req, res) => {
     const session = new AuditSession({ shopId: req.shopId, auditId, status: "active" });
     await session.save();
 
-    // Reset scanner mapping state for new audit session
-    activeRaspberryPis.clear();
+    // Broadcast current active scanners count so UI maintains active columns
+    broadcast({
+      source: "system",
+      activeScannersCount: activeScannersCount
+    });
 
-    res.json({ message: "Audit session started", session });
+    res.json({ message: "Audit session started", session, activeScannersCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
