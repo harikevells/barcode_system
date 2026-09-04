@@ -1382,26 +1382,19 @@ function RackHistory() {
     return 1;
   };
 
-  const activeScannerNums = new Set();
-  sessionScans.forEach(item => {
-    activeScannerNums.add(getScannerNumber(item));
-  });
-
-  const maxDetectedScanner = activeScannerNums.size > 0 ? Math.max(...Array.from(activeScannerNums)) : 0;
-
-  const baseScannerCount = Math.max(
-    serverScannerCount || 0,
-    maxDetectedScanner,
-    0
-  );
-
-  const actualScannerCount = baseScannerCount;
+  // Rely on serverScannerCount for active columns; default to at least 1 if connected
+  const baseScannerCount = Math.max(serverScannerCount || 0, 1);
   const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
-  // Group scans by scanner and reverse so newest scan is on top row!
+  // Group scans by scanner and reverse so newest scan is on top row.
+  // Clamp any legacy or stray scanner numbers to maxScannerNum to prevent expanding table beyond connected active scanners.
   const scansByScanner = scannersToShow.map(num =>
-    filteredData.filter(item => getScannerNumber(item) === num).slice().reverse()
+    filteredData.filter(item => {
+      const rawNum = getScannerNumber(item);
+      const clampedNum = Math.min(rawNum, scannersToShow.length);
+      return clampedNum === num;
+    }).slice().reverse()
   );
   const maxRows = Math.max(...scansByScanner.map(arr => arr.length), 0);
 

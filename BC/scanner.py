@@ -160,10 +160,15 @@ class ScannerManager:
     def device_key(device):
         """Return a stable physical USB identity across Linux event path changes and USB interfaces."""
         if hasattr(device, 'phys') and device.phys:
-            # Strip interface specifiers (e.g. :1.0, :1.1, /input0) to isolate physical USB port
-            clean = re.sub(r'[:/].*', '', device.phys)
+            # Strip trailing /inputX and interface specifier (:1.0, :1.1) while preserving PCI port colons
+            clean = re.sub(r'/input\d+.*$', '', device.phys)
+            clean = re.sub(r':\d+\.\d+$', '', clean)
             if clean:
                 return f"phys:{clean}"
+        # Fallback for devices with empty phys attribute: group by device name and vendor/product ID
+        info = getattr(device, 'info', None)
+        if info and hasattr(device, 'name'):
+            return f"info:{device.name}_{getattr(info, 'vendor', 0):04x}:{getattr(info, 'product', 0):04x}"
         if hasattr(device, 'path') and device.path:
             return f"path:{device.path}"
         return str(id(device))
@@ -197,28 +202,16 @@ class ScannerManager:
                 continue
 
             keys = caps[evdev.ecodes.EV_KEY]
-            if evdev.ecodes.KEY_ENTER not in keys:
-                continue
-            scanner_like_keys = (
-                    evdev.ecodes.KEY_0,
-                    evdev.ecodes.KEY_1,
-                    evdev.ecodes.KEY_2,
-                    evdev.ecodes.KEY_3,
-                    evdev.ecodes.KEY_4,
-                    evdev.ecodes.KEY_5,
-                    evdev.ecodes.KEY_6,
-                    evdev.ecodes.KEY_7,
-                    evdev.ecodes.KEY_8,
-                    evdev.ecodes.KEY_9,
-                    evdev.ecodes.KEY_A,
-                    evdev.ecodes.KEY_B,
-                    evdev.ecodes.KEY_C,
-                    evdev.ecodes.KEY_KP0,
-                    evdev.ecodes.KEY_KP1,
-                    evdev.ecodes.KEY_KP2,
+            
+            # Barcode scanners must be primary keyboard input devices emitting digits and ENTER
+            required_keys = (
+                evdev.ecodes.KEY_ENTER,
+                evdev.ecodes.KEY_1,
+                evdev.ecodes.KEY_2,
+                evdev.ecodes.KEY_3,
             )
-            if not any(key in keys for key in scanner_like_keys):
-                logger.info(f"Skipping keyboard without barcode keys: {d.path} | Name: {d.name}")
+            if not all(k in keys for k in required_keys):
+                logger.info(f"Skipping non-primary scanner input node: {d.path} | Name: {d.name}")
                 continue
 
             # Deduplicate multiple interfaces from the same physical USB device
@@ -335,20 +328,31 @@ class ScannerManager:
             claimed_keys.add(pkey)
             logger.info(f"New scanner plugged in during runtime -> assigned Scanner {free_id}")
 
-        old_count = len(self.workers)
-        self.workers = new_workers
+        # Recompact worker IDs to contiguous 1..N slots (e.g. 2 active scanners are always Scanner 1 and Scanner 2)
+        compacted_workers = {}
+        sorted_existing = sorted(new_workers.values(), key=lambda w: w.scanner_id)
+        for idx, worker in enumerate(sorted_existing):
+            sid = idx + 1
+            worker.scanner_id = sid
+            compacted_workers[sid] = worker
+
+        self.workers = compacted_workers
         active_count = len(self.workers)
 
-        if active_count != old_count:
-            logger.info(f"Active scanner count changed during runtime: {old_count} -> {active_count}")
+        # Notify Web API server if scanner count changed or if last report failed/unacknowledged
+        if active_count != getattr(self, '_last_sent_count', None):
+            logger.info(f"Syncing active scanner count to EC2: {active_count} (was {getattr(self, '_last_sent_count', None)})")
             try:
-                requests.post(
+                resp = requests.post(
                     WEB_API_URL.replace("/api/barcode", "/api/scanners/count"),
                     json={"count": active_count},
                     timeout=2
                 )
+                if resp.status_code == 200:
+                    self._last_sent_count = active_count
+                    logger.info(f"✅ Active scanner count successfully synced to EC2: {active_count}")
             except Exception as e:
-                logger.error(f"Failed to send active scanner count: {e}")
+                logger.error(f"Failed to send active scanner count to EC2: {e}")
 
         return active_count
 
