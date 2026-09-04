@@ -1062,7 +1062,7 @@ function RackHistory() {
           console.log("📡 WS raw message:", event.data);
           try {
             const data = JSON.parse(event.data);
-            if (data.source === "system" && data.activeScannersCount) {
+            if (data.source === "system" && data.activeScannersCount !== undefined) {
               if (!isUnmounted) setServerScannerCount(data.activeScannersCount);
             } else if (data.source === "serial" && data.value) {
               const currentSession = activeSessionRef.current;

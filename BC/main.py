@@ -26,7 +26,7 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        RotatingFileHandler("/home/pi/BC/logs/scanner.log", maxBytes=5*1024*1024, backupCount=5),
+        RotatingFileHandler("/home/pi/BC/logs/scanner.log", maxBytes=510241024, backupCount=5),
         logging.StreamHandler()
     ]
 )
@@ -92,7 +92,7 @@ def main():
     try:
         while running:
 
-            active_count = scanner_manager.get_active_count()
+            active_count = scanner_manager.refresh_scanners()
             total_scans = database.get_scan_count()
 
             logger.info(

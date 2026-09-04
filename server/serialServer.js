@@ -63,8 +63,9 @@ const shelfSchema = new mongoose.Schema({
 const Shelf = mongoose.model("Shelf", shelfSchema);
 
 const bcScanSchema = new mongoose.Schema({
-  shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', required: true, index: true },
+  shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', index: true },
   rowId: { type: Number, index: true },
+  scanId: { type: String, sparse: true, index: true },
   scannerId: Number,
   barcode: String,
   timestamp: Date,
@@ -448,11 +449,16 @@ app.post("/api/scanners/ping", (req, res) => {
 
 // Endpoint for Python Raspberry Pi script
 app.post("/api/barcode", async (req, res) => {
-  // Python script might send {"barcode": "...", "scanner": "..."}
+  // Python script sends {"scan_id": "...", "barcode": "...", "scanner": "..."}
+  const scanId = req.body.scan_id || req.body.scanId;
   const barcode = req.body.barcode || req.body.data || Object.keys(req.body)[0];
   const scannerId = req.body.scanner || req.body.scannerId || req.body.scanner_id || "1";
 
-  console.log(`📥 /api/barcode received: barcode="${barcode}" scanner="${scannerId}" from ${req.ip}`);
+  console.log(`📥 /api/barcode received: barcode="${barcode}" scanner="${scannerId}" scanId="${scanId}" from ${req.ip}`);
+
+  if (!barcode) {
+    return res.status(400).json({ error: "MISSING_BARCODE", message: "Barcode is required" });
+  }
 
   let activeSession = null;
   try {
@@ -466,22 +472,35 @@ app.post("/api/barcode", async (req, res) => {
     return res.status(500).json({ error: "Database error checking audit status" });
   }
 
-
   if (!isNaN(scannerId)) {
     activeRaspberryPis.set(String(scannerId), Date.now());
-    // Do not recalculate count here — /api/scanners/count is authoritative
   }
 
-  if (isDuplicateScan(barcode)) {
-    console.log(`⏩ Duplicate scan ignored: "${barcode}"`);
+  // Idempotency check using scan_id (if provided by Python client)
+  if (scanId) {
+    const existingBCScan = await BCScan.findOne({ scanId });
+    const existingSessionScan = activeSession.scans.find(s => s.scanId === scanId);
+
+    if (existingBCScan || existingSessionScan) {
+      console.log(`⏩ Duplicate scan_id retry ignored: "${scanId}" (barcode "${barcode}")`);
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: "Scan already processed"
+      });
+    }
+  } else if (isDuplicateScan(barcode)) {
+    // Fallback hardware bounce protection within 200ms for requests without scan_id
+    console.log(`⏩ Hardware bounce duplicate scan ignored: "${barcode}"`);
     return res.status(200).json({ message: "Ignored duplicate scan" });
   }
 
   try {
-    // 1. Save to MongoDB so it shows up in Rack History!
+    // 1. Save to BCScan collection
     const bcScan = new BCScan({
       shopId: activeSession.shopId,
       rowId: Date.now() + Math.floor(Math.random() * 1000),
+      scanId: scanId || undefined,
       scannerId: isNaN(scannerId) ? null : parseInt(scannerId),
       barcode: barcode,
       timestamp: new Date(),
@@ -489,16 +508,27 @@ app.post("/api/barcode", async (req, res) => {
     });
     await bcScan.save();
 
-    // 2. Broadcast directly to React WebSocket so the UI updates LIVE!
+    // 2. Save directly into the active audit session scans array
+    activeSession.scans.push({
+      barcode: barcode,
+      timestamp: new Date(),
+      scanner: String(scannerId),
+      scanId: scanId || undefined
+    });
+    activeSession.totalScannedItems = activeSession.scans.length;
+    await activeSession.save();
+
+    // 3. Broadcast directly to React WebSocket so the UI updates LIVE!
     broadcast({
       source: "serial",
       port: `RaspberryPi (Scanner ${scannerId})`,
       scanner: String(scannerId),
       value: barcode,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      scanId: scanId || undefined
     });
 
-    console.log(`✅ Broadcasted: "${barcode}" to ${clients.size} WebSocket client(s)`);
+    console.log(`✅ Saved & Broadcasted scan: "${barcode}" (Scanner ${scannerId}, scanId=${scanId || "none"}) to ${clients.size} WebSocket client(s)`);
     res.json({ success: true, message: "Saved and Broadcasted" });
   } catch (err) {
     console.error("Error in /api/barcode:", err);
@@ -1487,7 +1517,7 @@ const auditSessionSchema = new mongoose.Schema({
   startTime: { type: Date, default: Date.now },
   endTime: { type: Date, default: null },
   status: { type: String, enum: ["active", "saved", "discarded"], default: "active" },
-  scans: [{ barcode: String, timestamp: Date, scanner: String }],
+  scans: [{ barcode: String, timestamp: Date, scanner: String, scanId: String }],
   totalScannedItems: { type: Number, default: 0 }
 });
 
@@ -1499,6 +1529,10 @@ app.post("/api/audit-sessions", async (req, res) => {
     const auditId = "AUDIT-" + Date.now();
     const session = new AuditSession({ shopId: req.shopId, auditId, status: "active" });
     await session.save();
+
+    // Reset scanner mapping state for new audit session
+    activeRaspberryPis.clear();
+
     res.json({ message: "Audit session started", session });
   } catch (err) {
     res.status(500).json({ error: err.message });
