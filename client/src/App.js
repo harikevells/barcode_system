@@ -590,7 +590,22 @@ const parseExcelFile = async (file, expectedType) => {
       const barcode = colMap.barcode !== undefined ? String(rowData[colMap.barcode] || "").trim() : undefined;
       const productName = colMap.productName !== undefined ? String(rowData[colMap.productName] || "").trim() : undefined;
       const mrp = colMap.mrp !== undefined ? parseFloat(rowData[colMap.mrp]) || 0 : undefined;
-      const quantity = colMap.quantity !== undefined ? parseInt(rowData[colMap.quantity]) || 0 : undefined;
+      let quantity = undefined;
+      if (colMap.quantity !== undefined) {
+        const rawVal = rowData[colMap.quantity];
+        if (typeof rawVal === "number") {
+          quantity = Math.round(rawVal);
+        } else if (rawVal !== undefined && rawVal !== null && String(rawVal).trim() !== "") {
+          let str = String(rawVal).trim().replace(/[,\s]/g, "");
+          if (str.startsWith("(") && str.endsWith(")")) {
+            str = "-" + str.slice(1, -1);
+          }
+          const parsed = parseInt(str, 10);
+          quantity = !isNaN(parsed) ? parsed : 0;
+        } else {
+          quantity = 0;
+        }
+      }
 
       if (productName || barcode) {
         rows.push({ barcode, productName, mrp, physicalQuantity: quantity, quantity });
@@ -1384,6 +1399,7 @@ function RackHistory() {
 
   // Rely on serverScannerCount for active columns; default to at least 1 if connected
   const baseScannerCount = Math.max(serverScannerCount || 0, 1);
+  const actualScannerCount = baseScannerCount;
   const maxScannerNum = manualScannerCount !== null ? manualScannerCount : baseScannerCount;
   const scannersToShow = Array.from({ length: maxScannerNum }, (_, i) => i + 1);
 
@@ -2185,6 +2201,9 @@ function ProductManagement() {
     }
 
     try {
+      const parsedQty = parseInt(formData.physicalQuantity, 10);
+      const finalPhysicalQty = !isNaN(parsedQty) ? parsedQty : 0;
+
       const response = await fetch(`${API_BASE_URL}/products`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2192,7 +2211,7 @@ function ProductManagement() {
           barcode: formData.barcode,
           productName: formData.productName,
           mrp: parseFloat(formData.mrp) || 0,
-          physicalQuantity: parseInt(formData.physicalQuantity) || 0
+          physicalQuantity: finalPhysicalQty
         })
       });
 
@@ -2392,7 +2411,7 @@ function ProductManagement() {
                   />
                 </div>
                 <div>
-                  <label style={{ display: "block", marginBottom: 6, fontWeight: 600, color: "#333" }}>Physical Quantity</label>
+                  <label style={{ display: "block", marginBottom: 6, fontWeight: 600, color: "#333" }}>System Quantity</label>
                   <input
                     type="number"
                     value={formData.physicalQuantity}
@@ -2497,7 +2516,7 @@ function ProductManagement() {
               onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
             >
               <span style={{ fontSize: "14px", color: "#581c87", fontWeight: 600 }}>Total Amount:</span>
-              <span style={{ fontSize: "15px", fontWeight: 800, color: "#581c87" }}>₹{totalAmount.toLocaleString('en-IN')}</span>
+              <span style={{ fontSize: "15px", fontWeight: 800, color: totalAmount < 0 ? "#dc2626" : "#581c87" }}>{totalAmount < 0 ? `-₹${Math.abs(totalAmount).toLocaleString('en-IN')}` : `₹${totalAmount.toLocaleString('en-IN')}`}</span>
             </div>
           </div>
 
@@ -2521,7 +2540,7 @@ function ProductManagement() {
                   <tr key={product._id} style={{ borderBottom: "1px solid #eee" }}>
                     <td style={{ padding: 12, fontFamily: "monospace", fontWeight: 600 }}>{product.barcode}</td>
                     <td style={{ padding: 12 }}>{product.productName}</td>
-                    <td style={{ textAlign: "center", padding: 12, fontWeight: 600 }}>{product.physicalQuantity}</td>
+                    <td style={{ textAlign: "center", padding: 12, fontWeight: 600, color: Number(product.physicalQuantity) < 0 ? "#dc2626" : "inherit" }}>{product.physicalQuantity}</td>
                     <td style={{ textAlign: "center", padding: 12 }}>₹{product.mrp}</td>
                     {/* <td style={{ textAlign: "center", padding: 12 }}>
                       <button
@@ -2759,7 +2778,7 @@ function AuditScanning() {
                           {p.productName}
                         </td>
                         <td style={{ padding: "10px 12px", fontFamily: "monospace", color: "#666" }}>{p.barcode}</td>
-                        <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 600, color: "#555" }}>{p.physicalQuantity}</td>
+                        <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 600, color: Number(p.physicalQuantity) < 0 ? "#dc2626" : "#555" }}>{p.physicalQuantity}</td>
                         <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: 700, color: scanned > 0 ? (isOver ? "#c62828" : "#2e7d32") : "#bbb", fontSize: 16 }}>
                           {scanned > 0 ? scanned : "-"}
                         </td>
@@ -3172,17 +3191,16 @@ function ActivityLogs() {
         cell.alignment = { horizontal: "center" };
       });
 
-      summarySheet.addRow(["Overall Product Count", overallProductCount, "N/A"]);
-      summarySheet.addRow(["Total Product Quantity", overallProductQty, overallProductAmt]);
+      summarySheet.addRow(["Total Barcode Count", overallProductCount, "N/A"]);
+      summarySheet.addRow(["Total Product Quantity", totalSystemQty, totalSystemAmt]);
       summarySheet.addRow(["Total Out Product Quantity", totalSales, totalSalesAmt]);
-      summarySheet.addRow(["Total Available Product Quantity", totalSystemQty, totalSystemAmt]);
 
       // Format Summary numbers
-      for (let i = 4; i <= 7; i++) {
+      for (let i = 4; i <= 6; i++) {
         const row = summarySheet.getRow(i);
         row.getCell(2).alignment = { horizontal: "right" };
         if (i > 4) {
-          row.getCell(3).numFmt = "₹#,##0.00";
+          row.getCell(3).numFmt = "₹#,##0.00;[Red]-₹#,##0.00";
           row.getCell(3).alignment = { horizontal: "right" };
         } else {
           row.getCell(3).alignment = { horizontal: "center" };
@@ -3408,7 +3426,7 @@ function ActivityLogs() {
           gap: "12px",
           marginBottom: "20px"
         }}>
-          {/* Card 1: Overall Product Count */}
+          {/* Card 1: Total Barcode Count */}
           <div style={{
             background: "linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)",
             border: "1px solid #bfdbfe",
@@ -3425,7 +3443,7 @@ function ActivityLogs() {
             onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#1e3a8a", fontWeight: 500 }}>
-              Overall Product Count: <strong style={{ fontWeight: 700 }}>{overallProductCount}</strong>
+              Total Barcode Count: <strong style={{ fontWeight: 700 }}>{overallProductCount}</strong>
             </span>
           </div>
 
@@ -3446,7 +3464,7 @@ function ActivityLogs() {
             onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
-              Total Product Quantity: <strong style={{ fontWeight: 700 }}>{overallProductQty}</strong>
+              Total Product Quantity: <strong style={{ fontWeight: 700 }}>{totalSystemQty}</strong>
             </span>
           </div>
 
@@ -3512,7 +3530,7 @@ function ActivityLogs() {
             onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
           >
             <span style={{ fontSize: "13px", color: "#14532d", fontWeight: 500 }}>
-              Total Product Amount: <strong style={{ fontWeight: 700 }}>₹{overallProductAmt.toLocaleString()}</strong>
+              Total Product Amount: <strong style={{ fontWeight: 700 }}>{totalSystemAmt < 0 ? `-₹${Math.abs(totalSystemAmt).toLocaleString('en-IN')}` : `₹${totalSystemAmt.toLocaleString('en-IN')}`}</strong>
             </span>
           </div>
 
