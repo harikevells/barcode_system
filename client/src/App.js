@@ -2456,7 +2456,7 @@ function ProductManagement() {
               onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
               onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0px)"}
             >
-              <span style={{ fontSize: "14px", color: "#1e3a8a", fontWeight: 600 }}>Overall Product Count:</span>
+              <span style={{ fontSize: "14px", color: "#1e3a8a", fontWeight: 600 }}>Total Barcode Count:</span>
               <span style={{ fontSize: "15px", fontWeight: 800, color: "#1e3a8a" }}>{overallProductQty}</span>
             </div>
 
@@ -2845,7 +2845,7 @@ function ReconciliationReport() {
     const headers = [
       "Barcode", "Product Name", "MRP", "",
       "System Qty", "System Value", "",
-      "Phy Qty", "Phy Value", "",
+      "Audit Qty", "Audit Value", "",
       "Diff", "Diff Value"
     ];
     sheet.addRow(headers);
@@ -2932,11 +2932,11 @@ function ReconciliationReport() {
               <div style={{ fontSize: 24, fontWeight: 700, color: "#1565c0" }}>₹{summary.totalSysAmt.toLocaleString()}</div>
             </div>
             <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8, border: "1px solid #f3e8ff" }}>
-              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Phy Qty</div>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Audit Qty</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#7c3aed" }}>{summary.totalPhyQty}</div>
             </div>
             <div style={{ background: "#fdf5ff", padding: 16, borderRadius: 8, border: "1px solid #f3e8ff" }}>
-              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Phy Value</div>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 4 }}>Total Audit Value</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: "#7c3aed" }}>₹{summary.totalPhyAmt.toLocaleString()}</div>
             </div>
             <div style={{ background: summary.totalDiffQty === 0 ? "#e8f5e9" : "#ffebee", padding: 16, borderRadius: 8, border: summary.totalDiffQty === 0 ? "1px solid #bbf7d0" : "1px solid #fecaca" }}>
@@ -2959,8 +2959,8 @@ function ReconciliationReport() {
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0" }}>MRP</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>System Qty</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#eef2ff", borderRight: "1px solid #c7d2fe" }}>System Value</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Phy Qty</th>
-                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Phy Value</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Audit Qty</th>
+                <th style={{ textAlign: "center", padding: 12, fontWeight: 700, background: "#f5f3ff", borderRight: "1px solid #ddd6fe" }}>Audit Value</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, borderRight: "1px solid #e2e8f0", color: data.some(d => d.diff !== 0) ? "#c62828" : "#2e7d32" }}>Diff</th>
                 <th style={{ textAlign: "center", padding: 12, fontWeight: 700, color: data.some(d => d.diffAmt !== 0) ? "#c62828" : "#2e7d32" }}>Diff Value</th>
               </tr>
