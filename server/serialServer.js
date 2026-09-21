@@ -719,13 +719,15 @@ app.post("/api/products", async (req, res) => {
 
     const isNew = !product;
     const previousQty = product ? product.physicalQuantity : 0;
+    const parsedQty = Number(physicalQuantity);
+    const finalQty = Number.isFinite(parsedQty) ? parsedQty : 0;
 
     if (product) {
       // Update existing product
       product.productName = productName;
       if (cleanBarcode) product.barcode = cleanBarcode;
       product.mrp = mrp;
-      product.physicalQuantity = physicalQuantity;
+      product.physicalQuantity = finalQty;
       product.updatedAt = new Date();
       await product.save();
     } else {
@@ -735,7 +737,7 @@ app.post("/api/products", async (req, res) => {
         barcode: cleanBarcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase(),
         productName,
         mrp,
-        physicalQuantity
+        physicalQuantity: finalQty
       });
       await product.save();
     }
@@ -747,13 +749,13 @@ app.post("/api/products", async (req, res) => {
       action,
       productName,
       previousQty,
-      physicalQuantity,
+      finalQty,
       isNew ? "Manual Create" : "Manual Update",
       product.barcode,
-      isNew ? `Created manually with Qty: ${physicalQuantity}` : `Updated manually: Qty ${previousQty} → ${physicalQuantity}`,
+      isNew ? `Created manually with Qty: ${finalQty}` : `Updated manually: Qty ${previousQty} → ${finalQty}`,
       sessionId,
       mrp,
-      physicalQuantity,
+      finalQty,
       req.shopId
     );
 
@@ -997,7 +999,8 @@ app.post("/api/products/import", async (req, res) => {
 
       const finalBarcode = cleanBarcode || "GEN_" + Math.random().toString(36).substr(2, 9).toUpperCase();
       const finalMRP = mrp !== undefined ? mrp : 0;
-      const finalQty = physicalQuantity !== undefined ? physicalQuantity : 0;
+      const parsedQty = Number(physicalQuantity);
+      const finalQty = Number.isFinite(parsedQty) ? parsedQty : 0;
 
       try {
         let product = null;
@@ -1208,7 +1211,7 @@ app.post("/api/sales/import", async (req, res) => {
 
       const product = matches[0];
       const previousQty = Number(product.physicalQuantity) || 0;
-      const newQty = Math.max(0, previousQty - soldQty);
+      const newQty = previousQty - soldQty;
 
       product.physicalQuantity = newQty;
       product.updatedAt = new Date();
@@ -1271,7 +1274,7 @@ app.post("/api/tester-damage/import", async (req, res) => {
 
       const product = matches[0];
       const previousQty = Number(product.physicalQuantity) || 0;
-      const newQty = Math.max(0, previousQty - removeQty);
+      const newQty = previousQty - removeQty;
 
       product.physicalQuantity = newQty;
       product.updatedAt = new Date();
@@ -1334,7 +1337,7 @@ app.post("/api/shrinkage/import", async (req, res) => {
 
       const product = matches[0];
       const previousQty = Number(product.physicalQuantity) || 0;
-      const newQty = Math.max(0, previousQty - removeQty);
+      const newQty = previousQty - removeQty;
 
       product.physicalQuantity = newQty;
       product.updatedAt = new Date();
@@ -1433,7 +1436,7 @@ app.get("/api/reconciliation/report", async (req, res) => {
     const products = await Product.find(productQuery);
 
     for (const product of products) {
-      const sysQty = product.physicalQuantity || 0; // The count imported from Excel (Master Data)
+      const sysQty = typeof product.physicalQuantity === "number" ? product.physicalQuantity : (Number(product.physicalQuantity) || 0); // The count imported from Excel (Master Data)
       const phyQty = scanCountMap[product.barcode] || 0; // The live count from scanners
       const mrp = product.mrp || 0;
 
